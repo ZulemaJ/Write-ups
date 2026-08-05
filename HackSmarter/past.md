@@ -1,68 +1,61 @@
 # Past
 
-# (Active Directory — No Creds - TimeRoast |
-# RBCD (Resource Based Constrained Delegation Attack )
-#  )
+**Category:** Active Directory, No Credentials  
+**Techniques:** TimeRoasting, Kerberos-only authentication, BloodHound enumeration, Resource-Based Constrained Delegation (RBCD)
 
-# ENUMERATION:
+## TL;DR
 
-Nmap scan :
+Starting with zero credentials against a domain controller, guest SMB access leaked a list of AD hosts but little else. Most of the standard no-creds AD playbook came up empty. The path in was **TimeRoasting**, which cracked a machine account hash (`APPDEV01$`). That account's SMB access exposed a logon script on SYSVOL containing a user's (`tyler`) cleartext password. NTLM logon was blocked by an account restriction, so authentication was done over **Kerberos** instead. BloodHound then revealed that `tyler` held `GenericAll` on the domain controller object, abused via an **RBCD attack** to forge a ticket as Administrator, dump secrets, and log in with `evil-winrm`.
+
+## Full Walkthrough
+
+### Enumeration
+
+An Nmap scan against the target reveals the common port set of a domain controller.
 
 ![past screenshot 1](images/past/past-01.png)
 
-The output reveals common ports of a domain controller.
-
-Trying **RPCENUMERATION**:
+RPC enumeration is attempted first but returns Access Denied.
 
 ![past screenshot 2](images/past/past-02.png)
 
-Access Denied.
-
-**SMB Enumeration as Guest **
+SMB as a **guest** account fares better: the `IPC$` and `Share` shares are both readable.
 
 ![past screenshot 3](images/past/past-03.png)
 
-As Guest, we can read IPC$ and Share shares.
-
-**SMB Anonymous Login** :
-
-Using impact-smbclient :
+Confirming the same access anonymously with `impacket-smbclient`:
 
 ![past screenshot 4](images/past/past-04.png)
 
-In the /Share folder, we find AD_machines.txt which contains the machines related to the current AD.
+Inside `/Share`, `AD_machines.txt` lists the machines belonging to this AD environment.
 
-## AD methodology NO CREDS:
+### Working the No-Creds AD Methodology
 
-Since we do not have any kind of leaked credentials, and we don’t know how to move further, we will follow the Orange-cyberdefense methodology which is specifically for AD with no Creds.
+With no leaked credentials to work from, the next step is to follow [Orange Cyberdefense's AD methodology for environments with no creds](https://orange-cyberdefense.github.io/ocd-mindmaps/img/mindmap_ad_dark_classic_2025.03.excalidraw.svg).
 
-https://orange-cyberdefense.github.io/ocd-mindmaps/img/mindmap_ad_dark_classic_2025.03.excalidraw.svg
-
-1. First of all we use **nxc smb** to **generate a host file**
+First, `nxc smb` generates a hosts file from the domain:
 
 ![past screenshot 5](images/past/past-05.png)
 
-And adding it to /etc/hosts
+...which gets added to `/etc/hosts`:
 
 ![past screenshot 6](images/past/past-06.png)
 
-We have then tried different other methodology commands but with no success.
+Most of the remaining techniques on the mindmap were worked through systematically and led nowhere on this target. The one that actually paid off was **TimeRoasting**.
 
-## TIMEROASTING :
+### TimeRoasting
 
-The one that has success was **timeroast**, using **timeroast.py**
+`Timeroast` is an Active Directory attack that exploits predictable timestamps in the Windows Time (NTP/SNTP) service to obtain password hashes of machine accounts. An attacker sends specially crafted time requests, extracts the returned cryptographic material, and attempts to crack the machine account password offline.
 
-**_`Timeroast`_**_` is an Active Directory attack that exploits predictable timestamps in the Windows Time (NTP/SNTP) service to obtain password hashes of machine accounts. An attacker sends specially crafted time requests, extracts the returned cryptographic material, and attempts to crack the machine account password offline.`_
-
-- Running timeroast.py with the output log
+Running `timeroast.py` and logging the output:
 
 ![past screenshot 7](images/past/past-07.png)
 
-- We succeeded to retrieve some hashes with their corresponding RID at the beginning!
+Several hashes come back, each with its RID prefixed at the start of the line:
 
 ![past screenshot 8](images/past/past-08.png)
 
-**CRACKING SNTP HASHES WITH HASHCAT **
+Cracking the SNTP hashes with Hashcat:
 
 ![past screenshot 9](images/past/past-09.png)
 
@@ -70,25 +63,23 @@ The one that has success was **timeroast**, using **timeroast.py**
 
 ![past screenshot 11](images/past/past-11.png)
 
-The output reveals that we have finally cracked one of the hashed password.
+One of the hashes cracks successfully.
 
-## CHECKING THE RIDs :
+### Identifying the Cracked Account
 
-To check which machine/user’s password we have cracked, we use nxc smb with --rid flag, which will list the RIDs of the domain.
+`nxc smb --rid` lists the RIDs of the domain so the cracked hash can be matched to an account:
 
 ![past screenshot 12](images/past/past-12.png)
 
-Since the password we have cracked was associated to the **RID 1115**, we now know that **we have cracked the APPDEV01$ password**.
-
-- Checking if we are right, using crackmapexec :
+The cracked password maps to **RID 1115** (the `APPDEV01$` machine account). Confirming with CrackMapExec:
 
 ![past screenshot 13](images/past/past-13.png)
 
-… and listing accessible shares :
+...and listing the shares it can access:
 
 ![past screenshot 14](images/past/past-14.png)
 
-- We can now login to SMB with user APPDEV01$ , to read SYSVOL share :
+Logging into SMB as `APPDEV01$` to read the `SYSVOL` share:
 
 ![past screenshot 15](images/past/past-15.png)
 
@@ -96,125 +87,97 @@ Since the password we have cracked was associated to the **RID 1115**, we now kn
 
 ![past screenshot 17](images/past/past-17.png)
 
-In the /past.local/scripts we finally found **tyler_init.cmd** which contains Tyler’s password.
+Inside `/past.local/scripts`, `tyler_init.cmd` contains Tyler's password in plaintext.
 
-# AUTHENTICATING AS “TYLER”
+### Authenticating as Tyler
 
-Trying to Auth as Tyler using crackmapexec, we face the “ACCOUNT_RESTRICTION” error.
+A direct CrackMapExec auth attempt as Tyler hits an `ACCOUNT_RESTRICTION` error:
 
 ![past screenshot 18](images/past/past-18.png)
 
-To work around this, Kerberos authentication can be used instead.
-
-By requesting a Ticket Granting Ticket (TGT), we authenticate via Kerberos, which does not enforce the same logon restrictions.
-
-**REQUESTING A TGT :**
-
-- Using impacket-getTGT
+NTLM logon for this account is restricted, but Kerberos authentication isn't subject to the same restriction. Requesting a Ticket Granting Ticket (TGT) with `impacket-getTGT`:
 
 ![past screenshot 19](images/past/past-19.png)
 
-- Now that the ticket has been forged, we export it :
+Exporting the forged ticket:
 
 ![past screenshot 20](images/past/past-20.png)
 
-- And we try again to auth as Tyler but this time with Kerberos using kcache
+Authenticating as Tyler again, this time over Kerberos with `KRB5CCNAME`:
 
 ![past screenshot 21](images/past/past-21.png)
 
-**
-# BloodHound Enumeration**
+### BloodHound Enumeration
 
-Since we have now a user account with credentials and Kerberos TGT, we can proceed to run **_Bloodhound-ce-python_** which will work from our local host.
+With a working Kerberos-authenticated account, `bloodhound-ce-python` can now run from the attacking host:
 
-We will use :
-
-- -k = for kerberos
-
-- -d = domain
-
-- -dc = domain controller
-
-- -ns = nameserver
-
-- -c = Collectionmethods
-
-- --zip = to obtain a zip file.
+- `-k`: Kerberos auth
+- `-d`: domain
+- `-dc`: domain controller
+- `-ns`: nameserver
+- `-c`: collection methods
+- `--zip`: package the output as a zip
 
 ![past screenshot 22](images/past/past-22.png)
 
-- Once set Bloodhound up and uploaded the .json files, inspecting it, we found that **TYLER HAS GENERIC ALL PERMISSION over the DOMAIN CONTROLLER.**
+Loading the collected data into BloodHound reveals that **Tyler has `GenericAll` over the domain controller object.**
 
 ![past screenshot 23](images/past/past-23.png)
 
-This allows us to perform a **_Resource-Based Constrained Delegation attack_**:
-
-`add a computer, configure delegation, and impersonate a privileged user.`
+That permission is enough for a **Resource-Based Constrained Delegation** attack: add a computer account, configure delegation on the DC to trust it, and impersonate a privileged user through it.
 
 ![past screenshot 24](images/past/past-24.png)
 
-# RESOURCE-BASED CONSTRAINED DELEGATION ATTACK
+### Resource-Based Constrained Delegation Attack
 
-We could use the above exploit methodology explained in BloodHound, but this time we will use
+BloodHound's built-in guidance covers the exploit path, but this run uses **BloodyAD** instead.
 
-## BloodyAD
-
-1. **Create a Computer Account** :
+Creating a computer account:
 
 ![past screenshot 25](images/past/past-25.png)
 
-1. **Add Resource Based Constrained Delegation**
-
-Next, we configure Resource-Based Constrained Delegation, granting our machine account BLACK$ the ability to delegate to (and thus impersonate users on) the domain controller EC2AMAZ-A5O4OL8$
+Configuring Resource-Based Constrained Delegation, granting the new machine account `BLACK$` the ability to delegate to (and thus impersonate users on) the domain controller `EC2AMAZ-A5O4OL8$`:
 
 ![past screenshot 26](images/past/past-26.png)
 
-1. Unset the KRB5CCNAME :
+Unsetting `KRB5CCNAME` before requesting a fresh ticket:
 
 ![past screenshot 27](images/past/past-27.png)
 
-1. **Requesting a Service Ticket ST**
-
-Using :
-
-- Impacket-getST
-
-Request a ST for the cifs/EC2AMAZ-A5O4OL8.past.local SPN while impersonating the Administrator's account, leveraging the delegation rights of our controlled machine account BLACK$ to obtain a usable ticket as the domain admin.
+Requesting a Service Ticket with `impacket-getST` for the `cifs/EC2AMAZ-A5O4OL8.past.local` SPN, impersonating the Administrator account and leveraging `BLACK$`'s delegation rights:
 
 ![past screenshot 28](images/past/past-28.png)
 
-1. Exporting the Ticket :
+Exporting the ticket:
 
 ![past screenshot 29](images/past/past-29.png)
 
-1. Trying to auth as Administrator with nxc , using kerberos Auth (-k) and kcache
+Authenticating as Administrator with `nxc`, using Kerberos (`-k`) and the exported ccache:
 
 ![past screenshot 30](images/past/past-30.png)
 
-We did it!
+Domain Admin, confirmed.
 
-# DUMPING SECRETS AND LOGGING AS ADMIN :
+### Dumping Secrets and Logging In as Admin
 
-Now that we have a usable ST as Admin,
-
-We can dump secrets using impacket-secretsdump with Kerberos Authentication
+With a valid Administrator ticket, `impacket-secretsdump` dumps the domain secrets over Kerberos:
 
 ![past screenshot 31](images/past/past-31.png)
 
 ![past screenshot 32](images/past/past-32.png)
 
-- With the hashes obtained, we could log in winrm as Administrator through **evil-winrm** :
+The dumped hashes give WinRM access as Administrator via `evil-winrm`:
 
 ![past screenshot 33](images/past/past-33.png)
 
-We’re in.
+Full administrative access to the DC.
 
-- To search for Ryan’s password, we checked the **History.txt** :
+One more loose end: Ryan's password, found in `History.txt`:
 
 ![past screenshot 34](images/past/past-34.png)
 
 ![past screenshot 35](images/past/past-35.png)
 
-… and we obtained it.
+---
 
-# PAWNED !
+*Educational write-up from an authorized lab environment (HackSmarter). Not a guide for unauthorized access.*

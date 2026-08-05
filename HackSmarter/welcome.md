@@ -1,225 +1,170 @@
-# Welcome (CA ESC1 — Certipy)
+# Welcome
 
-Credentials obtained :
+**Category:** Active Directory Certificate Services (AD CS)  
+**Techniques:** PDF password cracking, RPC user enumeration, password spraying, BloodHound ACL abuse (GenericAll), ESC1 certificate template abuse
 
-`e.hills:Il0vemyj0b2025!`
+## TL;DR
 
-# ENUMERATION
+Starting from one known credential, SMB enumeration led to a password-protected PDF cracked with `pdf2john` and John, revealing a default password pattern for new users. RPC enumeration plus a password spray against that pattern turned up valid credentials for `a.harris`. From there, a BloodHound-mapped `GenericAll` chain was walked twice: `a.harris` (via HR group membership) reset `i.park`'s password, and `i.park` (via Helpdesk group membership) reset both `svc_ca` and `svc_web`. Neither service account allowed WinRM or RDP, but `svc_ca` pointed toward AD CS. Running Certipy against the CA turned up an **ESC1** misconfiguration: a low-privileged account could request a certificate impersonating any identity, including Administrator. Requesting that certificate and authenticating with it yielded the Administrator hash and full domain compromise.
 
-NMAP:
+## Full Walkthrough
+
+### Starting Credentials
+
+```
+e.hills:Il0vemyj0b2025!
+```
+
+### Enumeration
+
+Nmap:
 
 ![welcome screenshot 1](images/welcome/welcome-01.png)
 
-## SMB ENUMERATION
+### SMB Enumeration
 
 ![welcome screenshot 2](images/welcome/welcome-02.png)
 
-Human Resources seems interesting
-
-Let’s update the /etc/hosts first
+A "Human Resources" share stands out. First, updating `/etc/hosts`:
 
 ![welcome screenshot 3](images/welcome/welcome-03.png)
 
 ![welcome screenshot 4](images/welcome/welcome-04.png)
 
-And now login to smb :
-
-- Impacket-smbclient
+Logging into SMB with `impacket-smbclient`:
 
 ![welcome screenshot 5](images/welcome/welcome-05.png)
 
-# INITIAL ACCESS AS A.HARRIS
+### Initial Access as a.harris
 
-Trying to open the StartGuide.pdf :
+Attempting to open `StartGuide.pdf`:
 
 ![welcome screenshot 6](images/welcome/welcome-06.png)
 
-We are gonna try the password we already know otherwise we’r gonna use :
-
-- pdf2john  to extract the password and crack it
-
-Since the password didn’t work :
-
-- Pdf2john
+The known password doesn't open it, so the hash is extracted with `pdf2john` and cracked:
 
 ![welcome screenshot 7](images/welcome/welcome-07.png)
-
-- Crack it with JTR
 
 ![welcome screenshot 8](images/welcome/welcome-08.png)
 
 ![welcome screenshot 9](images/welcome/welcome-09.png)
 
-So we know that there is a default password for new users.
+The cracked password turns out to be a default assigned to new users, a good candidate for spraying.
 
-## RPC USERS ENUM
-
-We can try now to enumerate users with rpcclient and try password spraying
+**RPC user enumeration:**
 
 ![welcome screenshot 10](images/welcome/welcome-10.png)
 
-## PASSWORD SPRAY
-
-We create a list of users and we spray passwords with crackmapexec :
+**Password spray:** building a user list and spraying the default password with CrackMapExec:
 
 ![welcome screenshot 11](images/welcome/welcome-11.png)
 
-We found creds :
+Valid credentials come back:
 
-`a.harris:Welcome2025!@`
+```
+a.harris:Welcome2025!@
+```
 
-Let’s see what we can do with him.
-
-Let’s try to WINRM :
+Testing WinRM with them:
 
 ![welcome screenshot 12](images/welcome/welcome-12.png)
 
-We got initial access as a.harris.
+Initial access confirmed as `a.harris`.
 
-# ACCESS AS I.PARK
+### Access as i.park
 
-Let’s run bloodhound to see what we can do and how we can move laterally :
-
-- Bloodhound-ce-python
+Running `bloodhound-ce-python` to map lateral movement options:
 
 ![welcome screenshot 13](images/welcome/welcome-13.png)
 
 ![welcome screenshot 14](images/welcome/welcome-14.png)
 
-We can see that A.HARRIS is member of HR which members have GenericALL on I.PARK
-
-Let’s Abuse it changing password:
+`a.harris` is a member of the HR group, which holds `GenericAll` over `i.park`. Abusing it by resetting the password:
 
 ![welcome screenshot 15](images/welcome/welcome-15.png)
 
-`net rpc password "TargetUser" "newP@ssword2022" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"`
+```
+net rpc password "TargetUser" "newP@ssword2022" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"
+```
 
 ![welcome screenshot 16](images/welcome/welcome-16.png)
 
-We have a password policy set.
-
-Let’s make it more complex
+A password policy blocks the first attempt. Using a more complex password instead:
 
 ![welcome screenshot 17](images/welcome/welcome-17.png)
 
-And check :
+Confirming the change:
 
 ![welcome screenshot 18](images/welcome/welcome-18.png)
 
-Cool.
+`i.park`'s password is successfully reset.
 
-We changed successfully i.park’s password.
+### Access as svc_ca and svc_web
 
-# ACCESS AS SVC_CA & SVC_WEB
-
-What we can do with i.park?
+Checking what `i.park` can reach:
 
 ![welcome screenshot 19](images/welcome/welcome-19.png)
 
-I.PARK member of HELPDESK which members can change password to both svc.
+`i.park` is a member of the Helpdesk group, which can reset the password of both service accounts. Abusing both the same way:
 
-Let’s abuse both
-
-`net rpc password "TargetUser" "newP@ssword2022" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"`
+```
+net rpc password "TargetUser" "newP@ssword2022" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"
+```
 
 ![welcome screenshot 20](images/welcome/welcome-20.png)
 
-With them we cannot WIRM or RDP
+Neither account allows WinRM or RDP. The name `svc_ca` is the more interesting lead: it points at Certificate Services rather than a general-purpose account.
 
-How to escalate as a root?
+### Access as Administrator
 
-What is svc_ca?
-
-Well at this point I had to check a hint in the walkthrough cos I didn’t know what to do with it.
-
-# ACCESS AS ADMINISTRATOR
-
-Apparently it is a matter of Certificates Service.
-
-Now that we have access as svc_ca we try to identify vulnerable certificate templates using:
-
-- Certipy
-
-https://github.com/ly4k/Certipy
+With that in mind, the next step is checking the CA itself for vulnerable certificate templates, using [Certipy](https://github.com/ly4k/Certipy):
 
 ![welcome screenshot 21](images/welcome/welcome-21.png)
 
-Let’s follow the installation:
-
-https://github.com/ly4k/Certipy/wiki/04-%E2%80%90-Installation
-
-Once installed:
+Following the [installation guide](https://github.com/ly4k/Certipy/wiki/04-%E2%80%90-Installation):
 
 ![welcome screenshot 22](images/welcome/welcome-22.png)
 
-To look for specific modules’ help, we run :
-
-- Certipy <module> -h
-
-We’re gonna run “Certipy find” with -vulnerable flag, in order to discover just vulnerable certificates
+Running `certipy find -vulnerable` to surface only vulnerable templates:
 
 ![welcome screenshot 23](images/welcome/welcome-23.png)
 
-In the json :
+The resulting JSON report:
 
 ![welcome screenshot 24](images/welcome/welcome-24.png)
 
-## But what is
-## ESC1
-##  and
-## ESC17
-## ?
+Two findings stand out: **ESC1** and **ESC17**.
 
-**ESC1** is an **Active Directory Certificate Services (AD CS)** misconfiguration where a low-privileged user can request a certificate for **any identity** (e.g., Domain Administrator).
+**ESC1** is an AD CS misconfiguration where a low-privileged user can request a certificate for any identity, including Domain Administrator. This lets an attacker authenticate as that privileged user without ever knowing their password, leading to privilege escalation and potentially full domain compromise.
 
-This allows the attacker to authenticate as that privileged user without knowing their password, leading to **privilege escalation and potentially full domain compromise**.
+**ESC17** is an AD CS misconfiguration where a certificate template allows a low-privileged user to request a Server Authentication certificate for an arbitrary internal hostname, via a user-controlled SAN. Combined with the ability to manipulate internal DNS records, this can let an attacker impersonate trusted HTTPS services (such as WSUS) and achieve SYSTEM-level code execution on clients.
 
-**ESC17** is an **AD CS misconfiguration** where a certificate template allows a low-privileged user to request a **Server Authentication** certificate for an arbitrary internal hostname (via a user-controlled SAN). When combined with the ability to manipulate internal DNS records, an attacker can impersonate trusted HTTPS services (such as **WSUS**) and achieve **SYSTEM-level code execution** on clients.
+The JSON report notes ESC17 may need extra prerequisites here, so ESC1 is the path taken.
 
-As stated in the .json report, this may require other prerequisites.
-
-We’re definitely gonna go for ESC1
-
-## ESC1 EXPLOITATION
-
-In order to exploit it, we need to request for a certificate on behalf of any specified account
-
-According to :
-
-https://github.com/ly4k/Certipy/wiki/06-%E2%80%90-Privilege-Escalation
+**Exploiting ESC1:** the plan is to request a certificate on behalf of any specified account, per [Certipy's privilege escalation guide](https://github.com/ly4k/Certipy/wiki/06-%E2%80%90-Privilege-Escalation):
 
 ![welcome screenshot 25](images/welcome/welcome-25.png)
 
-We’re gonna use:
-
-- certipy req
-
-First, we’re gonna add WELCOME-CA to /etc/hosts according to our certificate :
+First, adding `WELCOME-CA` to `/etc/hosts` to match the certificate:
 
 ![welcome screenshot 26](images/welcome/welcome-26.png)
 
 ![welcome screenshot 27](images/welcome/welcome-27.png)
 
-Then request the certificate with :
-
-- certipy req
+Requesting the certificate with `certipy req`:
 
 ![welcome screenshot 28](images/welcome/welcome-28.png)
 
-We got a certificate for administrator.
-
-How to use it now?
-
-To authenticate as administrator, we need to use :
-
-- Certipy auth -pfx (the private key saved as administrator.pfx)
+A certificate for Administrator comes back. Authenticating with it using `certipy auth -pfx` against the saved `administrator.pfx`:
 
 ![welcome screenshot 29](images/welcome/welcome-29.png)
 
-We finally got the hash of administrator.
-
-Let’s check it authenticating with WINRM :
+The Administrator hash is recovered. Confirming access over WinRM:
 
 ![welcome screenshot 30](images/welcome/welcome-30.png)
 
-# PWNED
+Domain Admin, confirmed.
+
+---
+
+*Educational write-up from an authorized lab environment (HackSmarter). Not a guide for unauthorized access.*

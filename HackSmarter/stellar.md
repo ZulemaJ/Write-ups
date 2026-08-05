@@ -1,457 +1,324 @@
-# Stellar — (AV — Firefox Data — DCSYNC)
+# Stellar
 
-# ENUMERATION :
+**Category:** Active Directory  
+**Techniques:** Default password reuse, DACL abuse (WriteOwner, ForceChangePassword, WriteDACL), Firefox credential decryption, ReadGMSAPassword, DCSync
 
-NMAP:
+## TL;DR
+
+Anonymous FTP access exposed a user guide PDF listing a default password, still unchanged on `junior.analyst`. That account had `WriteOwner` on a group whose members held `ForceChangePassword` over `ops.controller`, abused (after correcting the DACL abuse chain: taking ownership before granting write-members rights) to add `junior.analyst` to the group and reset `ops.controller`'s password. From `ops.controller`, several standard privesc angles (Kerberoasting, ASREPRoasting, AV tampering, scheduled tasks, PowerView) were all blocked, but a Firefox profile pulled from the desktop decrypted to reveal credentials for `astro.researcher`. That account had `WriteDACL` over `eng.payload`, abused to grant full control and reset its password. `eng.payload` in turn could read a GMSA password directly and, more importantly, held DCSync rights on the domain controller, used with `impacket-secretsdump` to dump the Administrator hash and complete the compromise.
+
+## Full Walkthrough
+
+### Enumeration
+
+Nmap:
 
 ![stellar screenshot 1](images/stellar/stellar-01.png)
 
-Ports as usual.
-
-## FTP ENUM
-
-Let’s check FTP if anon is allowed:
+Standard port set. **FTP enumeration:** checking for anonymous access:
 
 ![stellar screenshot 2](images/stellar/stellar-02.png)
 
-It is.
-
-What’s inside?
+Allowed. Checking the contents:
 
 ![stellar screenshot 3](images/stellar/stellar-03.png)
 
-Docs seem to be interesting.
-
-Let’s check it out:
+A "Docs" directory looks interesting:
 
 ![stellar screenshot 4](images/stellar/stellar-04.png)
 
-We’r gonna download them and then check them.
-
-When opening the pdf :
+Downloading the files for later review. Opening one PDF immediately fails:
 
 ![stellar screenshot 5](images/stellar/stellar-05.png)
 
-Let’s keep it aside for now and continue enumerating.
+Setting it aside for now and continuing enumeration.
 
-## ENUM4LINUX :
+`enum4linux`:
 
 ![stellar screenshot 6](images/stellar/stellar-06.png)
 
-## HTTP ENUM:
-
-PORT 80:
+**HTTP enumeration**, port 80:
 
 ![stellar screenshot 7](images/stellar/stellar-07.png)
 
-Nothing wow.
-
-Any dirs?
-
-- Feroxbuster :
+Nothing there. Directory brute-forcing with Feroxbuster:
 
 ![stellar screenshot 8](images/stellar/stellar-08.png)
 
 ![stellar screenshot 9](images/stellar/stellar-09.png)
 
-Well, nothing.
-
-## SMB ENUM :
+Also empty. **SMB enumeration:**
 
 ![stellar screenshot 10](images/stellar/stellar-10.png)
 
-Can’t find nothing for now.
+Nothing found here either. The FTP documents look like the most promising lead, but the PDF keeps reporting a "file damaged" error.
 
-I think that the only way should be through some documents in ftp.
-
-But it dumps always an error like “file damaged”
-
-## FTP ENUM (AGAIN):
-
-Let’s use another tool to open the pdf :
-
-- Mupdf
-
-It works :
+**Back to FTP:** opening the file with a different reader, `mupdf`, works:
 
 ![stellar screenshot 11](images/stellar/stellar-11.png)
 
-In the userGuide we found a default password.
-
-`Galaxy123!`
-
-All users are required to change their password immediately after their first login.
-
-What if junior.analyst has not changed the password yet?
-
-Let’s check if junior.analyst has changed its password:
+The user guide contains a default password, `Galaxy123!`, with a note that all users must change it after first login. Worth checking whether `junior.analyst` still has it:
 
 ![stellar screenshot 12](images/stellar/stellar-12.png)
 
-And indeed he hasn’t.
-
-Let’s see which shares we can access w crackmapexec
+They do. Checking accessible shares with CrackMapExec:
 
 ![stellar screenshot 13](images/stellar/stellar-13.png)
 
-SYSVOL always interesting
-
-Let’s check it , but first let’s update /etc/hosts
+SYSVOL is always worth a look. Updating `/etc/hosts` first:
 
 ![stellar screenshot 14](images/stellar/stellar-14.png)
 
-Login to SMB :
+Logging into SMB:
 
 ![stellar screenshot 15](images/stellar/stellar-15.png)
 
 ![stellar screenshot 16](images/stellar/stellar-16.png)
 
-Nothing interesting inside.
-
-## RPCENUM :
-
-Let’s gather users through rpcclient
+Nothing interesting inside. **RPC enumeration** to gather users:
 
 ![stellar screenshot 17](images/stellar/stellar-17.png)
 
-Cool
-
-Let’s now try to WINRM and RDP
-
-WINRM = Failed
+Trying WinRM and RDP with `junior.analyst`'s credentials:
 
 ![stellar screenshot 18](images/stellar/stellar-18.png)
 
-RDP = Failed
+Both fail. Continuing the attack from Kali instead of expecting direct shell access.
 
-Ok, we’r gonna work on our kali.
+### Initial Access as ops.controller
 
-# INITIAL ACCESS AS OPS.CONTROLLER :
-
-## BLOODHOUND ENUM :
-
-Let’s try to run bloodhound remotely first w/ :
-
-- bloodhound-ce-python
+**BloodHound enumeration**, run remotely with `bloodhound-ce-python`:
 
 ![stellar screenshot 19](images/stellar/stellar-19.png)
 
-And now let’s see if we have some misconfigurations :
+Checking for misconfigurations:
 
 ![stellar screenshot 20](images/stellar/stellar-20.png)
 
-And we have write-owner on Stellarops-control !
-
-What we can do with it?
-
-Checking in Bloodhound “Linux Abuse” :
+`junior.analyst` has `WriteOwner` on the `Stellarops-control` group. Checking BloodHound's Linux Abuse guidance for this edge:
 
 ![stellar screenshot 21](images/stellar/stellar-21.png)
 
-We can add members to the group
-
-Let’s inspect first this group :
+`WriteOwner` allows adding members to the group. Inspecting the group first:
 
 ![stellar screenshot 22](images/stellar/stellar-22.png)
 
-Stellarops memebrs have ForceChange Password on OPS.CONTROLLER.
+Members of `Stellarops-control` hold `ForceChangePassword` over `ops.controller`. The plan: add `junior.analyst` to the group, then reset `ops.controller`'s password.
 
-Let’s add junior.analyst to the group so that we can change the password of OPS.CONTROLLER and move laterally
+Following the standard instructions to add a member directly:
 
-Following the instructions :
-
-`net rpc group addmem "TargetGroup" "TargetUser" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"`
+```
+net rpc group addmem "TargetGroup" "TargetUser" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"
+```
 
 ![stellar screenshot 23](images/stellar/stellar-23.png)
 
-So maybe we have to change the permissions first
+That alone isn't enough, the permissions need changing first:
 
-`dacledit.py -action 'write' -rights 'WriteMembers' -principal 'controlledUser' -target-dn 'groupDistinguishedName' 'domain'/'controlledUser':'password'`
+```
+dacledit.py -action 'write' -rights 'WriteMembers' -principal 'controlledUser' -target-dn 'groupDistinguishedName' 'domain'/'controlledUser':'password'
+```
 
 ![stellar screenshot 24](images/stellar/stellar-24.png)
 
-Well, maybe it is a matter of Distinguished name.
-
-Let’s put the entire one :
+Still no luck, possibly a distinguished name issue. Trying the fully qualified DN:
 
 ![stellar screenshot 25](images/stellar/stellar-25.png)
 
 ![stellar screenshot 26](images/stellar/stellar-26.png)
 
-Why??
+Still not working. Re-reading BloodHound more carefully clarifies the actual order of operations: ownership needs to change before write-members rights can be granted:
 
-Checking better on Bloodhound:
-
-We first need to change the membership with :
-
-`owneredit.py -action write -owner 'attacker' -target 'victim' 'DOMAIN'/'USER':'PASSWORD'`
+```
+owneredit.py -action write -owner 'attacker' -target 'victim' 'DOMAIN'/'USER':'PASSWORD'
+```
 
 ![stellar screenshot 27](images/stellar/stellar-27.png)
 
-## I put new-owner flag instead of -owner , cos “owner” is no longer supported
+(Note: the correct flag is `-new-owner`, not `-owner`, which is no longer supported.)
 
-And again :
+Retrying with the correct flag:
 
 ![stellar screenshot 28](images/stellar/stellar-28.png)
 
-And now we can add him to the group :
+With ownership sorted, adding `junior.analyst` to the group:
 
 ![stellar screenshot 29](images/stellar/stellar-29.png)
 
-No output == success.
-
-Let’s now Change the password of OPS.CONTROLLER
+No output, which means success here. Changing `ops.controller`'s password:
 
 ![stellar screenshot 30](images/stellar/stellar-30.png)
 
 ![stellar screenshot 31](images/stellar/stellar-31.png)
 
-And check :
+Confirming:
 
 ![stellar screenshot 32](images/stellar/stellar-32.png)
 
-Yes!
-
-Let’s go ahead
-
-Ops.controller has no outbound object control.
-
-Let’s try to WINRM:
+Password changed successfully. `ops.controller` has no outbound object control of its own. Trying WinRM:
 
 ![stellar screenshot 33](images/stellar/stellar-33.png)
 
-Failed
-
-RDP?  == failed
+Fails, as does RDP:
 
 ![stellar screenshot 34](images/stellar/stellar-34.png)
 
-Weird, cos he is member of Remote Management.
-
-Let’s try again winrm
-
-Changing -i with ip address (WHATTHEFUCK Chloe)
+Unexpected, since the account is a member of Remote Management. Retrying WinRM after realizing the target flag needs the IP address rather than the hostname:
 
 ![stellar screenshot 35](images/stellar/stellar-35.png)
 
-We’re in :)
+That was the issue. Access confirmed.
 
-# ENUMERATION AGAIN :
+### Enumeration as ops.controller
 
-Let’s check powershell history
+Checking PowerShell history:
 
 ![stellar screenshot 36](images/stellar/stellar-36.png)
 
-No history?
-
-Checking Kerberoastable users on Bloodhound, we found :
+Empty. Checking BloodHound for kerberoastable users:
 
 ![stellar screenshot 37](images/stellar/stellar-37.png)
 
-Let’s try to kerberoast it with Rubeus :
+Trying to kerberoast with Rubeus:
 
 ![stellar screenshot 38](images/stellar/stellar-38.png)
 
-Possible AV
-
-Let’s try from our kali :
+Possibly blocked by AV. Trying from Kali instead:
 
 ![stellar screenshot 39](images/stellar/stellar-39.png)
 
-That’s weird
-
-And asreproast?
+Also unsuccessful. ASREPRoasting:
 
 ![stellar screenshot 40](images/stellar/stellar-40.png)
 
-Let’s run winpeas
+Running WinPEAS:
 
 ![stellar screenshot 41](images/stellar/stellar-41.png)
 
-Of course we can’t.
-
-Listing processes:
+Blocked, as expected given the AV presence. Listing processes:
 
 ![stellar screenshot 42](images/stellar/stellar-42.png)
 
-We can see that Microsoft Defender is running.
-
-Can we stop it?
+Microsoft Defender is running. Checking whether it can be stopped:
 
 ![stellar screenshot 43](images/stellar/stellar-43.png)
 
-We do not have permissions.
-
-Listing Scheduled Tasks :
+No permissions for that. Listing scheduled tasks:
 
 ![stellar screenshot 44](images/stellar/stellar-44.png)
 
-Not permitted.
+Not permitted either.
 
 ![stellar screenshot 45](images/stellar/stellar-45.png)
 
-SatLink Service has:
+A more promising thread: the `SatLink Service` account holds `DCSync`, `GetChanges`, `GetChangesInFilteredSet`, and `GetChangesAll` on `DC01`, clearly the eventual path to full compromise. BloodHound flags it as kerberoastable, but the earlier attempts found nothing.
 
-- DCSync
-
-- GetChanges
-
-- GetChangesInFilteredSet
-
-- GetChangesALL on the DC01.
-
-This should be our way of privesc!
-
-But how?
-
-On Bloodhound it says that it is kerberoastable, but we found nothing.
-
-## Let’s maybe use other tools?
-
-Searching on Hacktricks I found some other ways of checking Kerberoastable users:
-
-- One way is using ADEnum : https://github.com/SecuProject/ADenum
-
-After having installed dependencies and run it:
+Checking other tools for kerberoastable users, starting with [ADenum](https://github.com/SecuProject/ADenum):
 
 ![stellar screenshot 46](images/stellar/stellar-46.png)
 
 ![stellar screenshot 47](images/stellar/stellar-47.png)
 
-No Entry found.
-
-I wanted to check with Powerview, but :
+No entries found. Trying PowerView:
 
 ![stellar screenshot 48](images/stellar/stellar-48.png)
 
-Blocked.
-
-I need to change direction.
-
-I’m in a rabbit hole.
-
-Let’s enumerate a bit more again :
+Blocked as well. This particular thread (kerberoasting `SatLink Service` directly) isn't panning out, time to change direction and enumerate more broadly.
 
 ![stellar screenshot 49](images/stellar/stellar-49.png)
 
-We can see that there is a Firefox setup in /ops.controller/Desktop.
-
-They’re using Firefox then.
-
-What if we could retrieve profiles info?
-
-Following the Hacktricks guide on Browser Artifacts :
-
-https://hacktricks.wiki/en/generic-methodologies-and-resources/basic-forensic-methodology/specific-software-file-type-tricks/browser-artifacts.html
-
-We found :
+A Firefox setup is visible in `/ops.controller/Desktop`, worth investigating for stored credentials. Following [HackTricks' browser artifacts guide](https://hacktricks.wiki/en/generic-methodologies-and-resources/basic-forensic-methodology/specific-software-file-type-tricks/browser-artifacts.html):
 
 ![stellar screenshot 50](images/stellar/stellar-50.png)
 
-And :
-
 ![stellar screenshot 51](images/stellar/stellar-51.png)
 
-We’re gonna download the entire directory with “download*” (being in evil-winrm)
+Downloading the entire profile directory with `download*` from `evil-winrm`:
 
 ![stellar screenshot 52](images/stellar/stellar-52.png)
 
-Once everything is downloaded, we can check better on our kali.
-
-What’s inside?
-
-Hacktricks also describes the kind of information that we could find inside :
+Once downloaded, it can be examined properly on Kali. HackTricks also documents what kind of information typically lives in a Firefox profile:
 
 ![stellar screenshot 53](images/stellar/stellar-53.png)
 
-It also talks about a way of decrypting the master password using :
-
-https://github.com/unode/firefox_decrypt
+...including a way to decrypt the master password with [firefox_decrypt](https://github.com/unode/firefox_decrypt):
 
 ![stellar screenshot 54](images/stellar/stellar-54.png)
 
-## DECRYPTING MASTER PASSWORD:
+### Decrypting the Master Password
 
-Let’s run it :
+Running it:
 
 ![stellar screenshot 55](images/stellar/stellar-55.png)
 
-And we found creds!
+Credentials recovered:
 
-`astro.researcher:Cosmos@42`
+```
+astro.researcher:Cosmos@42
+```
 
-On Bloodhound, let’s check Outbound Object Control:
+Checking outbound object control for this account in BloodHound:
 
 ![stellar screenshot 56](images/stellar/stellar-56.png)
 
-And we have WriteDacl on ENG.PAYLOAD.
-
-What can we do with it?
+`WriteDACL` on `eng.payload`. Checking the available options:
 
 ![stellar screenshot 57](images/stellar/stellar-57.png)
 
-We can either Change Password (after having assigned privs), or Kerberoast it.
+Either changing the password directly (after assigning the right permissions) or kerberoasting. Going with the password change.
 
-Let’s change password:
+**Assigning rights:**
 
-1. ASSIGNING RIGHTS :
-
-`dacledit.py -action 'write' -rights 'FullControl' -principal 'controlledUser' -target 'targetUser' 'domain'/'controlledUser':'password'`
+```
+dacledit.py -action 'write' -rights 'FullControl' -principal 'controlledUser' -target 'targetUser' 'domain'/'controlledUser':'password'
+```
 
 ![stellar screenshot 58](images/stellar/stellar-58.png)
 
-1. CHANGING PASSWORD:
+**Changing the password:**
 
-`net rpc password "TargetUser" "newP@ssword2022" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"`
+```
+net rpc password "TargetUser" "newP@ssword2022" -U "DOMAIN"/"ControlledUser"%"Password" -S "DomainController"
+```
 
 ![stellar screenshot 59](images/stellar/stellar-59.png)
 
-1. Check :
+Confirming:
 
 ![stellar screenshot 60](images/stellar/stellar-60.png)
 
-And we’ve done it.
-
-Now that we owned eng.payload, let’s see its Outbound Object Control :
+Done. Checking `eng.payload`'s own outbound object control:
 
 ![stellar screenshot 61](images/stellar/stellar-61.png)
 
-## ReadGMSAPassword.
+**ReadGMSAPassword** is available:
 
 ![stellar screenshot 62](images/stellar/stellar-62.png)
 
-Let’s try to read the password:
-
-We’re gonna use BloodyAD to try to read the password :
-
-https://www.thehacker.recipes/ad/movement/dacl/readgmsapassword
+Reading it with BloodyAD, following [this methodology](https://www.thehacker.recipes/ad/movement/dacl/readgmsapassword):
 
 ![stellar screenshot 63](images/stellar/stellar-63.png)
 
 ![stellar screenshot 64](images/stellar/stellar-64.png)
 
-And we got the base64 encoded and NT password.
-
-Check it :
+Both the base64-encoded and NT-format passwords come back:
 
 ![stellar screenshot 65](images/stellar/stellar-65.png)
 
-We don’t need explicitly to crack it for now.
+No need to crack anything further for now, the real prize is `eng.payload`'s DCSync rights, noted earlier.
 
-# ACCESS AS ADMINISTRATOR :
+### Access as Administrator
 
-As we’ve seen before that we can DCSync, meaning that we can impersonate the Domain Controller requesting any user’s password.
-
-Let’s ask for it using:
-
-- Impacket-secretsdumps
-
-Since we do not have the cleartext password, we’re gonna use the flag “-hashes” (NTLM format)
+With DCSync rights confirmed, the domain controller's replication can be impersonated to request any user's password directly with `impacket-secretsdump`. Since there's no cleartext password for `eng.payload`, the `-hashes` flag is used instead (NTLM format):
 
 ![stellar screenshot 66](images/stellar/stellar-66.png)
 
-And we got Administrator Hash :)
+The Administrator hash comes back.
 
 ![stellar screenshot 67](images/stellar/stellar-67.png)
 
-# PWNED
+Full domain compromise.
+
+---
+
+*Educational write-up from an authorized lab environment (HackSmarter). Not a guide for unauthorized access.*

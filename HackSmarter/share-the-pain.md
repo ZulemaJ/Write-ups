@@ -1,401 +1,241 @@
-# Share The Pain — (NTLM Theft — xp_cmdshell — Impersonate)
+# Share The Pain
 
-# ENUMERATION :
+**Category:** Active Directory  
+**Techniques:** NTLM theft (file-based coercion), BloodHound GenericAll abuse, port pivoting (Ligolo-ng, chisel), MSSQL access, xp_cmdshell, service impersonation (PrintSpoofer)
 
-- Nmap :
+## TL;DR
+
+With no credentials and no HTTP surface to work with, a UDP/TCP rescan turned up nothing new, so the way in came from **NTLM theft**: dropping browse-triggered lure files onto a writable SMB share and catching an NTLMv2 hash for `bob.ross` on Responder, cracked with Hashcat. BloodHound showed `bob.ross` held `GenericAll` over `alice.wonderland`, abused to force a password change and gain WinRM access. Alice's desktop held a base64-encoded string that turned out to just be the lab's user flag, not a credential, but `netstat` revealed a locally-bound MSSQL port. Pivoting to it took two attempts: a Ligolo-ng tunnel got the connection through but authentication kept failing, until switching to chisel and adding the missing `-windows-auth` flag on the client made it work. From the resulting `MSSQL` service context, impersonation and `xp_cmdshell` were both available, used to spawn a reverse shell and then escalate to SYSTEM with PrintSpoofer.
+
+## Full Walkthrough
+
+### Enumeration
+
+Nmap:
 
 ![share-the-pain screenshot 1](images/share-the-pain/share-the-pain-01.png)
 
-Common DC ports.
-
-We do not have an HTTP open.
-
-Since we do not have any credentials, we should check :
-
-- SMB
-
-- RPC
-
-We first run Enum4Linux-ng to see if there’s something juicy
+Common domain controller ports, no HTTP open. With no credentials, SMB and RPC are the starting points. Running `enum4linux-ng`:
 
 ![share-the-pain screenshot 2](images/share-the-pain/share-the-pain-02.png)
 
-- Enum4linux dumped some shares that we will check manually with SMBMap to check permissions.
+A few shares turn up, worth checking manually with SMBMap for actual permissions. RPC access looks denied at first glance, also worth confirming manually.
 
-- RPC access is apparently denied.  But we will check it manually btw.
-
-- SMBMap :
+`smbmap`:
 
 ![share-the-pain screenshot 3](images/share-the-pain/share-the-pain-03.png)
 
-We have **R/W permissions** just in “Share”
+Read/write access on the `Share` share.
 
 ![share-the-pain screenshot 4](images/share-the-pain/share-the-pain-04.png)
 
-As stated before, no access to RPC.
+RPC is indeed inaccessible.
 
-## SMBENUM :
-
-- Let’s access “Share” share, to see if we can find something inside.  We’ll use as usual impacket-smbclient
+**SMB enumeration:** browsing the `Share` share with `impacket-smbclient`:
 
 ![share-the-pain screenshot 5](images/share-the-pain/share-the-pain-05.png)
 
-Nothing inside.
-
-What’s particularly interesting is the fact that we have write permissions.
-
-Maybe, if there is some HTTP port open, it could be linked to the share, meaning that if we can put a shell on it, we could open it via HTTP ?
-
-From our scan, no HTTP open.
-
-Or maybe, is there 161 UDP open?  From this, we could enumerate users.
-
-- Let’s scan all TCP ports w/ NMAP and UDP 161.
+Empty, but the write access itself is notable. If an HTTP service turned out to be linked to this share, a planted shell could be reached over the web, but the earlier scan showed no HTTP port. Worth double-checking for SNMP (UDP 161) as an alternate route to enumerate users. Running a full TCP scan plus UDP 161:
 
 ![share-the-pain screenshot 6](images/share-the-pain/share-the-pain-06.png)
 
-I found 2 more TCP ports, but nothing interesting.
-
-- Let’s check now 161 UDP :
+Two more TCP ports appear, nothing useful. Checking UDP 161:
 
 ![share-the-pain screenshot 7](images/share-the-pain/share-the-pain-07.png)
 
-Ok we have to change strategy.
-
-Let’s see if we can find something running Script Scan w Nmap :
+Time to change strategy. A version/script scan for anything missed:
 
 ![share-the-pain screenshot 8](images/share-the-pain/share-the-pain-08.png)
 
-Nothing.
+Still nothing. With the writable share as the only real lead, this looks like a good fit for **NTLM theft**, a technique used previously on a similar OffSec-style box. Reference: [ntlm_theft](https://github.com/Greenwolf/ntlm_theft), which notes it works for phishing scenarios where SMB traffic is allowed out of the target network, or when already inside it.
 
-So we have no clues.
+### NTLM Theft: Gaining Bob's Credentials
 
-I remember I pwned a machine in Offsec which was pretty the same situation.
-
-What I used there was
-
-**NTLM Theft. **
-
-That’s the article where I Got it :
-
-https://github.com/Greenwolf/ntlm_theft
-
-`It can be used for phishing when either the target allows smb traffic outside their network, or if you are already inside the internal network.`
-
-Let’s try it .
-
-# NTLM THEFT — GAINING BOB CREDS.
-
-So according to the repository,
-
-- we clone it first :
+Cloning the repository:
 
 ![share-the-pain screenshot 9](images/share-the-pain/share-the-pain-09.png)
 
-- We install xlswriter with pipx, which is needed.
+Installing `xlsxwriter` with `pipx`, a dependency:
 
 ![share-the-pain screenshot 10](images/share-the-pain/share-the-pain-10.png)
 
-- We run a responder in another terminal
+Starting Responder in another terminal:
 
 ![share-the-pain screenshot 11](images/share-the-pain/share-the-pain-11.png)
 
-- We run the script ntlm_theft.py to generate the files. ( -s is the attacker ip)
+Running `ntlm_theft.py` to generate the lure files (`-s` is the attacker's IP):
 
 ![share-the-pain screenshot 12](images/share-the-pain/share-the-pain-12.png)
 
-We can see that it generates many kinds of files.  We’r gonna use the ones with “BROWSE TO FOLDER” statement, which do not require opening the file.
-
-It is enough that Windows visualizes the folder.
-
-- Since I didn’t know which one to put, I uploaded the two :
-
-- lure.lnk
-
-- desktop.ini
+Several file types come out of this. The "BROWSE TO FOLDER" variants are the most convenient, since they don't require the target to open anything, just browsing to the folder is enough. To cover both bases, both `lure.lnk` and `desktop.ini` are uploaded to the share:
 
 ![share-the-pain screenshot 13](images/share-the-pain/share-the-pain-13.png)
 
-- And on our responder :
+Checking Responder:
 
 ![share-the-pain screenshot 14](images/share-the-pain/share-the-pain-14.png)
 
-## We got the NTLMv2 of user bob.ross !
-
-We need first to crack it using Hashcat :
+An NTLMv2 hash for `bob.ross` comes through. Cracking it with Hashcat:
 
 ![share-the-pain screenshot 15](images/share-the-pain/share-the-pain-15.png)
 
 ![share-the-pain screenshot 16](images/share-the-pain/share-the-pain-16.png)
 
-The password is :
+```
+137Password123!@#
+```
 
-`137Password123!@#`
+With credentials in hand, the next checks are share permissions, RDP, WinRM, and RPC.
 
-Now that we have credentials, we can check :
-
-- Permissions on shares with crackmapexec
-
-- RDP access
-
-- Winrm access
-
-- RPCEnum
-
-## SMBENUM
-
-- Shares permissions with Crackmapexec:
+**SMB enumeration:** share permissions with CrackMapExec:
 
 ![share-the-pain screenshot 17](images/share-the-pain/share-the-pain-17.png)
 
-We keep in mind that we have READ permissions on SYSVOL.
-
-- Checking SYSVOL :
+Read access on SYSVOL, worth noting. Checking it:
 
 ![share-the-pain screenshot 18](images/share-the-pain/share-the-pain-18.png)
 
-Nothing.
-
-- RDP : failed
-
-- WINRM : failed
-
-- RPC Enum
+Nothing there. RDP fails, WinRM fails. **RPC enumeration:**
 
 ![share-the-pain screenshot 19](images/share-the-pain/share-the-pain-19.png)
 
-We got users.
-
-- We could query users with “queryuser”  to see if there are info leaks :
+A user list comes back. Querying each with `queryuser` for possible info leaks:
 
 ![share-the-pain screenshot 20](images/share-the-pain/share-the-pain-20.png)
 
-No leaks.
+No leaks, but the user list is saved for later. With a credentialed account but no direct access, the next moves are BloodHound and kerberoasting.
 
-We write down users btw.
-
-We’re gonna need them later.
-
-What should we do now?   We got a user and its credentials. But no access.
-
-We could try to :
-
-- Run bloodhound-ce-python
-
-- Kerberoast some users
-
-## KERBEROASTING
-
-Let’s start with kerberoasting.
-
-We’re gonna use : impacket-getUserSPNs
+**Kerberoasting** with `impacket-getUserSPNs`:
 
 ![share-the-pain screenshot 21](images/share-the-pain/share-the-pain-21.png)
 
-Nothing.
+Nothing comes of it.
 
-## BLOODHOUND
-
-- Running Bloodhound-ce-python :
+**BloodHound**, running `bloodhound-ce-python`:
 
 ![share-the-pain screenshot 22](images/share-the-pain/share-the-pain-22.png)
 
-We got the zip file.
-
-- Let’s analyze it on Bloodhound so that we can first check what kind of OUTBOUND OBJECT CONTROLS are assigned to bob.ross
+Analyzing `bob.ross`'s outbound object control:
 
 ![share-the-pain screenshot 23](images/share-the-pain/share-the-pain-23.png)
 
-Bingo.
-
-We can see that bob.ross has “**GenericALL**” on Alice.Wonderland.
-
-## With this ACL set, we can change Alice’s password directly from our system.
-
-Reading the Linux Abuse on Bloodhound we can see the commands to run :
+`bob.ross` holds `GenericAll` over `alice.wonderland`, enough to change her password directly. BloodHound's Linux Abuse tab shows the commands needed:
 
 ![share-the-pain screenshot 24](images/share-the-pain/share-the-pain-24.png)
 
-# FORCE CHANGE PASSWORD
+### Force Change Password
 
-1. We first need to generate and add the hosts file to the /etc/hosts file.
-
-- Generate it with nxc smb :
+Generating a hosts file with `nxc smb` and adding it to `/etc/hosts`:
 
 ![share-the-pain screenshot 25](images/share-the-pain/share-the-pain-25.png)
 
-- Add it to /etc/hosts
-
 ![share-the-pain screenshot 26](images/share-the-pain/share-the-pain-26.png)
 
-1. Now try to change the password using “net rpc password”
+Changing the password with `net rpc password`:
 
 ![share-the-pain screenshot 27](images/share-the-pain/share-the-pain-27.png)
 
-No output means “Success”.
+No output, which means success.
 
-# ACCESS AS ALICE.WONDERLAND
+### Access as alice.wonderland
 
-Now we start enum again, trying :
-
-- Check SMB permissions and if password has successfully changed with crackmapexec
-
-- RDP
-
-- WINRM
-
-- Crackmapexec
+Rechecking SMB permissions to confirm the password change, then RDP and WinRM:
 
 ![share-the-pain screenshot 28](images/share-the-pain/share-the-pain-28.png)
 
-Password has successfully changed.
-
-- RDP = failed
-
-- WINRM  w/ evil-winrm
+Password change confirmed. RDP fails, but WinRM via `evil-winrm` works:
 
 ![share-the-pain screenshot 29](images/share-the-pain/share-the-pain-29.png)
 
-We’re in.
+Access confirmed. Marking both users as owned in BloodHound to check for a shortest path from owned objects doesn't turn up anything, `alice` has no outbound object control of her own.
 
-We now have to Enumerate Alice.wonderland to see how we’r gonna elevate our privs.
+### Alice Enumeration
 
-But first, we can maybe check on Bloodhound marking the users as owned to see if there is a shortest path from owned objects.
-
-Nothing from here.
-
-Alice seems to have NO OUTBOUND OBJECTS CONTROL
-
-# ALICE ENUMERATION :
-
-- Let’s enumerate Alice and DC01 from win-rm whoami /all
+Checking privileges with `whoami /all`:
 
 ![share-the-pain screenshot 30](images/share-the-pain/share-the-pain-30.png)
 
-No interesting privileges
-
-- Checking dirs :
+Nothing interesting. Checking directories:
 
 ![share-the-pain screenshot 31](images/share-the-pain/share-the-pain-31.png)
 
-Something interesting in SQL2019??
+A `SQL2019` reference looks promising:
 
 ![share-the-pain screenshot 32](images/share-the-pain/share-the-pain-32.png)
 
-Denied.
+Access denied. Checking PowerShell history:
 
-- Something interesting in Powershell history?
-
--
 ![share-the-pain screenshot 33](images/share-the-pain/share-the-pain-33.png)
 
-Even checking manually there is no Powershell folder apparently.
-
-- Let’s check the Desktop to see if we can find something :
+No PowerShell folder even exists on manual inspection. Checking the Desktop:
 
 ![share-the-pain screenshot 34](images/share-the-pain/share-the-pain-34.png)
 
-We found something encoded in base64.
-
-Credentials??
-
-Let’s decode it :
+A base64-encoded string turns up, possibly credentials. Decoding it:
 
 ![share-the-pain screenshot 35](images/share-the-pain/share-the-pain-35.png)
 
-Is it a password?
-
-- Let’s check if it’s tyler.ramsey password :
+Testing whether it's `tyler.ramsey`'s password:
 
 ![share-the-pain screenshot 36](images/share-the-pain/share-the-pain-36.png)
 
-Nope.
+It isn't. It turns out to just be the lab's user flag, not a credential. Running WinPEAS turns up nothing interesting either.
 
-So it’s just the **FUCKING** user flag for the lab.
-
-- Let’s run winpeas : Nothing interesting found.
-
-## What is the path?
-
-- I could try to run Invoke-AllChecks to see if there is some possibilities of hijacking? (PowerUp.ps1)
+Trying PowerUp's `Invoke-AllChecks` for possible hijacking opportunities:
 
 ![share-the-pain screenshot 37](images/share-the-pain/share-the-pain-37.png)
 
-Nothing.
+Nothing there either. Worth checking for internal ports that might have been missed:
 
-## Maybe there is some internal port that I could access?
-
-Let’s try to list again all TCP ports, probably I missed something:
-
-- use : netstat -ant -p tcp
+```
+netstat -ant -p tcp
+```
 
 ![share-the-pain screenshot 38](images/share-the-pain/share-the-pain-38.png)
 
-That’s the **MSSQL port 1433**.
+MSSQL, port 1433, bound locally. The plan is to pivot into it with a tunnel and reach it from Kali.
 
-What we should do now is to pivot the port with ligolo, then try to access it from our kali
+### Port Forwarding
 
-# PORT FORWARDING
-
-- Start ligolo proxy on kali :
+Starting the Ligolo-ng proxy on Kali:
 
 ![share-the-pain screenshot 39](images/share-the-pain/share-the-pain-39.png)
 
-- Download the ligolo-agent.exe for windows and transfer it to the target
-
-Once transferred :
-
-- Connect with -ignore-cert flag
+Downloading and transferring the Ligolo agent to the target, then connecting with `-ignore-cert`:
 
 ![share-the-pain screenshot 40](images/share-the-pain/share-the-pain-40.png)
 
 ![share-the-pain screenshot 41](images/share-the-pain/share-the-pain-41.png)
 
-- Now we can forward the port 1433
+Forwarding port 1433:
 
 ![share-the-pain screenshot 42](images/share-the-pain/share-the-pain-42.png)
 
 ![share-the-pain screenshot 43](images/share-the-pain/share-the-pain-43.png)
 
-- Checking with NC :
+Checking connectivity with `nc`:
 
 ![share-the-pain screenshot 44](images/share-the-pain/share-the-pain-44.png)
 
-Now we can try to login :
+Attempting to log in:
 
 ![share-the-pain screenshot 45](images/share-the-pain/share-the-pain-45.png)
 
 ![share-the-pain screenshot 46](images/share-the-pain/share-the-pain-46.png)
 
-## Of course putain
+Login fails. Without SQL-specific credentials or a config file to lean on, and `tyler_ramsey` as an untested lateral move, this angle stalls for a while. Switching the forwarding tool looks worth trying.
 
-I got stucked as fuck
+### Accessing MSSQL
 
-What’s next?
-
-I suppose I have to move laterally to tyler_ramsey?
-
-But how?
-
-I need creds for SQL but no config files…
-
-At this point I really don’t know what to do
-
-## Maybe changing tool for forwarding?
-
-# ACCESS MSSQL :
-
-Let’s try with chisel :
-
-- After having downloaded and transferred it :
+Trying chisel instead. Downloading and transferring it:
 
 ![share-the-pain screenshot 47](images/share-the-pain/share-the-pain-47.png)
 
-- On kali, start chisel server
+Starting the chisel server on Kali:
 
 ![share-the-pain screenshot 48](images/share-the-pain/share-the-pain-48.png)
 
-- On windows, chisel client :
+Running the chisel client on the Windows target:
 
 ![share-the-pain screenshot 49](images/share-the-pain/share-the-pain-49.png)
 
@@ -403,7 +243,7 @@ Let’s try with chisel :
 
 ![share-the-pain screenshot 51](images/share-the-pain/share-the-pain-51.png)
 
-## Maybe we should try to request a ticket and enter with kerberos auth?
+Trying Kerberos authentication for the SQL connection instead, requesting a ticket:
 
 ![share-the-pain screenshot 52](images/share-the-pain/share-the-pain-52.png)
 
@@ -411,66 +251,58 @@ Let’s try with chisel :
 
 ![share-the-pain screenshot 54](images/share-the-pain/share-the-pain-54.png)
 
-## So maybe it’s just a matter of -windows-auth flag !
+The actual fix turns out to be much simpler: the client just needed the `-windows-auth` flag.
 
 ![share-the-pain screenshot 55](images/share-the-pain/share-the-pain-55.png)
 
-Fuck!!!!!!
+That was the missing piece the whole time. Access confirmed.
 
-Why am I so stupid?
+### Access as service\MSSQL
 
-We’re in.
-
-# ACCESS AS SERVICE\MSSQL
-
--  enumerate the db and see if we can gain a shell
+Enumerating the database to see whether a shell is reachable from here:
 
 ![share-the-pain screenshot 56](images/share-the-pain/share-the-pain-56.png)
 
-Nothing
-
-- Can we impersonate?
+Nothing immediately. Checking for impersonation options:
 
 ![share-the-pain screenshot 57](images/share-the-pain/share-the-pain-57.png)
 
-- Can we enable xp_cmdshell?
+Checking whether `xp_cmdshell` can be enabled:
 
 ![share-the-pain screenshot 58](images/share-the-pain/share-the-pain-58.png)
 
 ![share-the-pain screenshot 59](images/share-the-pain/share-the-pain-59.png)
 
-It works.
-
-## We have now to spawn a reverse shell with a powershell one-liner :
-
-- Encode the Powershell one-liner in base64
+It works. Spawning a reverse shell with a PowerShell one-liner: encoding it in base64,
 
 ![share-the-pain screenshot 60](images/share-the-pain/share-the-pain-60.png)
 
-- Set up a listener w/ Penelope
+setting up a Penelope listener,
 
 ![share-the-pain screenshot 61](images/share-the-pain/share-the-pain-61.png)
 
-- Run the payload with xp_cmdshell
+and running the payload through `xp_cmdshell`:
 
 ![share-the-pain screenshot 62](images/share-the-pain/share-the-pain-62.png)
 
 ![share-the-pain screenshot 63](images/share-the-pain/share-the-pain-63.png)
 
-We’re in again.
+Shell access confirmed.
 
-# PRIVILEGE ESCALATION
+### Privilege Escalation
 
-- Enumerating privs of the service :
+Checking the service account's privileges:
 
 ![share-the-pain screenshot 64](images/share-the-pain/share-the-pain-64.png)
 
-Let’s impersonate privs with Potatos or PrintSpoofer :
-
-- With Printspoofer (after having transferred netcat) :
+Impersonation privileges are present, exploitable with a Potato-family tool or PrintSpoofer. Using PrintSpoofer, after transferring netcat:
 
 ![share-the-pain screenshot 65](images/share-the-pain/share-the-pain-65.png)
 
 ![share-the-pain screenshot 66](images/share-the-pain/share-the-pain-66.png)
 
-# PAWNED
+SYSTEM shell obtained.
+
+---
+
+*Educational write-up from an authorized lab environment (HackSmarter). Not a guide for unauthorized access.*
