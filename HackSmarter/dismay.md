@@ -1,7 +1,17 @@
 # Dismay
 
-**Category:** Active Directory  
-**Techniques:** Loot from a foothold, archive password cracking, credential leak in a document, BloodHound ACL abuse chain (ForceChangePassword, GenericAll)
+**Category:** Active Directory
+
+## Attack Chain
+
+1. SMB access as `xiao.ge` (starting foothold) leads to Recycle Bin loot
+2. A decoy invoice document contains staging credentials that turn out unused
+3. `Confidential.7z` is cracked with John and rockyou
+4. Inside, a fake pentest report leaks `guy.rookie`'s plaintext password
+5. BloodHound shows `guy.rookie` has `ForceChangePassword` over `jena.yamazaki`
+6. `net rpc password` resets `jena.yamazaki`'s password
+7. `jena.yamazaki` has `GenericAll` over `mike.silver`, reset the same way
+8. Both accounts validate against DC1; a fresh BloodHound sweep starts there, investigation left open
 
 ## TL;DR
 

@@ -1,8 +1,21 @@
 # NorthBridge Systems
 
 **Difficulty:** Hard  
-**Category:** Active Directory  
-**Techniques:** Credential hunting in scripts/shares, DPAPI secret decryption, machine account quota (MAQ) OU bypass, Resource-Based Constrained Delegation (RBCD), local admin impersonation, Backup Operators abuse, DCSync
+**Category:** Active Directory
+
+## Attack Chain
+
+1. SMB share read and RDP access as `_securitytestingsvc` on `NORTHJMP01`
+2. `_svrautomationsvc` credentials found in `/scripts`
+3. `_svrautomationsvc`'s `WriteAccountRestrictions` is blocked domain-wide by a machine account quota of 0
+4. A PingCastle report reveals the `ServerProvisioning` OU is exempt from that quota restriction
+5. A new computer account is created inside that OU
+6. An RBCD attack is configured, impersonating a local admin group member rather than the Protected domain Administrator
+7. `NORTHJMP01` is rooted through impersonation of `smccormickT1` (member of `NorthJMP01Priv`)
+8. `secretsdump` of `NORTHJMP01` recovers the local Administrator hash
+9. DPAPI extraction recovers `_backupsvc`'s cleartext password from stored credentials
+10. `_backupsvc`'s Backup Operators membership on `NORTHDC01` dumps SAM/SYSTEM/SECURITY/NTDS remotely
+11. The `NORTHDC01$` machine hash is used to DCSync the built-in Administrator (RID 500, not Protected)
 
 ## TL;DR
 

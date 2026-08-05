@@ -1,7 +1,16 @@
 # BankSmarter
 
-**Category:** Linux Privilege Escalation  
-**Techniques:** SNMP credential leak, race condition/rename abuse, UNIX domain socket abuse, PATH hijacking
+**Category:** Linux Privilege Escalation
+
+## Attack Chain
+
+1. An SNMP community string (`public`) leaks SSH credentials for `Layne.Stanley`
+2. A root-owned backup script's target directory is renamed out of the way and replaced with a malicious payload
+3. The scheduled run executes the payload as `scott.weiland`
+4. `scott.weiland`'s home directory holds `pty_server.py`, a UNIX socket handing out a shell to the `bank-team` group
+5. Connecting to the socket with `socat` lands `ronnie.stone`
+6. `ronnie.stone`'s `bankers` group grants access to a root-run script resolving `python3` via `$PATH`
+7. A fake `python3` binary is placed on `$PATH`, yielding a root shell
 
 ## TL;DR
 

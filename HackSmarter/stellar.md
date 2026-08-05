@@ -1,7 +1,17 @@
 # Stellar
 
-**Category:** Active Directory  
-**Techniques:** Default password reuse, DACL abuse (WriteOwner, ForceChangePassword, WriteDACL), Firefox credential decryption, ReadGMSAPassword, DCSync
+**Category:** Active Directory
+
+## Attack Chain
+
+1. Anonymous FTP exposes a PDF with a default password, still valid on `junior.analyst`
+2. `junior.analyst` has `WriteOwner` on a group holding `ForceChangePassword` over `ops.controller`
+3. Ownership is taken, group membership added, `ops.controller`'s password reset
+4. Kerberoasting, ASREPRoasting, AV tampering, scheduled tasks, and PowerView are all blocked
+5. A Firefox profile pulled from `ops.controller`'s desktop decrypts to reveal `astro.researcher`'s credentials
+6. `astro.researcher` has `WriteDACL` on `eng.payload`, abused to reset its password
+7. `eng.payload` can read a GMSA password and holds DCSync rights on the domain controller
+8. DCSync dumps the Administrator hash
 
 ## TL;DR
 

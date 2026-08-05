@@ -1,8 +1,21 @@
 # Odyssey
 
 **Difficulty:** Hard  
-**Category:** Active Directory, Web Application  
-**Techniques:** Server-Side Template Injection (Jinja2), SUID/private key theft, password cracking (unshadow), password reuse, SeBackupPrivilege abuse, SeMachineAccountPrivilege (rogue machine join), GPO abuse (pyGPOAbuse)
+**Category:** Active Directory, Web Application
+
+## Attack Chain
+
+1. A Jinja2 SSTI on Web-01 achieves RCE, a shell as `ghill_sa`
+2. A stolen root SSH key, found in Bash history, roots Web-01
+3. The unshadowed root/`ghill_sa` hash is cracked; the password is reused successfully for RDP onto WKST-01
+4. Backup Operators membership doesn't grant `SeBackupPrivilege` until re-authenticating with an elevated RDP session
+5. `SeBackupPrivilege` is exploited via `reg save` to dump SAM/SYSTEM, recovering `bbarkinson`'s hash
+6. `bbarkinson`'s hash grants WinRM access to DC01, where `SeMachineAccountPrivilege` is found
+7. A new machine account is joined to the domain, after also fixing a DNS misconfiguration blocking BloodHound elsewhere
+8. BloodHound, run from the new machine account, reveals `bbarkinson`'s `GenericWrite` on a GPO
+9. `pyGPOAbuse` first tries creating a new Domain Admin, blocked by a username collision and then simply not triggering
+10. `pyGPOAbuse` instead adds the existing machine account directly to Domain Admins
+11. `secretsdump` recovers the Administrator hash for full domain compromise
 
 Lab context, as described by HackSmarter: Odyssey is modeled on a real engagement where the domain controllers weren't syncing correctly, causing problems throughout, and where a proxy requirement made tools like LDAP hard to use. Standard tooling doesn't always behave as expected here.
 

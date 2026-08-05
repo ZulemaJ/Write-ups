@@ -1,8 +1,17 @@
 # Evasive
 
 **Difficulty:** Medium  
-**Category:** Windows, Phishing, Client-Side Attack  
-**Techniques:** SMB/SMTP enumeration, password guessing from metadata, phishing payload delivery, custom Go reverse shell for AV evasion
+**Category:** Windows, Phishing, Client-Side Attack
+
+## Attack Chain
+
+1. Anonymous SMB access leaks an internal note (users Roger and Alfonso, plus a default password pattern)
+2. EXIF metadata from an SMB file reveals the current year, used to adjust the default password
+3. The adjusted password cracks Roger's SMTP credentials
+4. A phishing `.exe` crafted with `msfvenom` is emailed to Alfonso via `swaks`, no callback
+5. A custom Go reverse shell, cross-compiled for Windows, is sent the same way
+6. Still no callback; changing the listener port produces an "invalid shell" error
+7. Investigation left open, payload delivery never lands a shell
 
 ## TL;DR
 

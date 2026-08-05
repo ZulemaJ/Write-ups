@@ -1,7 +1,22 @@
 # City Council
 
-**Category:** Active Directory, Web Application  
-**Techniques:** LDAP traffic sniffing, Kerberoasting, NTLM theft, DPAPI credential extraction, WIM image extraction, ACL abuse chain, Shadow Credentials, ASPX webshell, SeImpersonatePrivilege (Potato)
+**Category:** Active Directory, Web Application
+
+## Attack Chain
+
+1. LDAP traffic sniffing over the VPN interface leaks `svc_services_portal`'s credentials from a job-application portal
+2. BloodHound shows no direct edges; Kerberoasting cracks `clerk.john`
+3. SMB write access found on a share is exploited via NTLM theft, cracking `jon.peters`
+4. `jon.peters`'s `GenericWrite` over three accounts widens via a targeted Kerberoast, cracking `maria.clerk` and `nina.soto`
+5. `nina.soto`'s access to a Backups share yields `.wim` disk images, extracted for local user profiles
+6. `clerk.john`'s profile reveals Emma Hayes' credentials are stored in Windows Credential Manager
+7. DPAPI extraction (master key plus credential blob) recovers `emma.hayes`'s password
+8. `emma.hayes`'s `WriteDACL` re-enables `sam.brooks`, gaining WinRM access
+9. Further ACL abuse (`WriteDACL` on an OU, a targeted Kerberoast, a Shadow Credentials attempt blocked by missing PKINIT) leads to a direct password reset for `web_admin`
+10. `RunasCs` spawns a shell as `web_admin`
+11. An existing ASPX test file confirms upload-and-execute access on the web root
+12. A proper ASPX webshell lands a shell as the IIS app pool identity
+13. `SeImpersonatePrivilege` is abused with a Potato exploit for full system compromise
 
 ## TL;DR
 

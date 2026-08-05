@@ -1,7 +1,16 @@
 # MartiniAD
 
-**Category:** Active Directory, No Credentials  
-**Techniques:** Anonymous SMB credential leak, Kerberoasting, SeMachineAccountPrivilege investigation, PowerShell history leak, krbtgt extraction via Golden Ticket technique
+**Category:** Active Directory, No Credentials
+
+## Attack Chain
+
+1. Anonymous SMB notes leak limited credentials for `mprice`
+2. Kerberoasting `ATHENA_SVC` cracks its password, unlocking WinRM
+3. `SeMachineAccountPrivilege` looks like a direct path to RBCD, but isn't; the attempt is correctly blocked
+4. PowerView, BloodHound, Rubeus, and LaZagne all fail (a WinPEAS `GenericAll` finding turns out to be a false positive)
+5. PowerShell history leaks the Administrator password directly
+6. Several Mimikatz/secretsdump attempts to extract `krbtgt` fail
+7. A specific `lsadump::lsa /inject` Mimikatz command extracts the `krbtgt` hash
 
 ## TL;DR
 

@@ -1,7 +1,18 @@
 # Ascension
 
-**Category:** Linux Privilege Escalation  
-**Techniques:** NFS enumeration and UID/GID spoofing (nfsshell), SSH key passphrase cracking, MySQL credential harvesting, port forwarding (chisel), process monitoring (pspy), capability abuse (cap_setuid)
+**Category:** Linux Privilege Escalation
+
+## Attack Chain
+
+1. Anonymous FTP yields a password wordlist; an NFS share holds a passphrase-protected SSH key pair for `user1`
+2. `nfsshell` is built (after patching for a modern GCC) to confirm NFS write access
+3. Uploading a new SSH key via NFS looks promising but fails, wrong writable path, a dead end
+4. Cracking the original key's passphrase with John/rockyou succeeds, SSH access as `user1`
+5. Database credentials found in `/var` unlock a MySQL instance reached via a `chisel` port forward
+6. A users table in MySQL leaks credentials for `user3`
+7. A second MySQL-adjacent port (33060) turns out to be a dead end
+8. Back on `user1`, `pspy` catches a root-owned `backup.sh` in `/tmp`; hijacking it lands a shell as `user2`, a partial lead
+9. Back on `user3`, a `python3` binary carrying `cap_setuid` is exploited via GTFOBins for a root shell
 
 ## TL;DR
 

@@ -1,7 +1,16 @@
 # ShadowGate
 
-**Category:** Active Directory, No Credentials  
-**Techniques:** TimeRoasting, ASREPRoasting, BloodHound GenericWrite abuse (targeted Kerberoasting), ADCS ESC8 (NTLM relay to certificate enrollment), DCSync
+**Category:** Active Directory, No Credentials
+
+## Attack Chain
+
+1. SMB/RPC enumeration lists 12 users but leaks nothing further; TimeRoast cracks no hash
+2. ASREPRoasting with the enumerated user list cracks `jtrueblood`'s password
+3. BloodHound: `jtrueblood` has `GenericWrite` on `bbrown`, abused via a targeted Kerberoast
+4. `bbrown` belongs to an ADCS-reader group; Certipy flags the CA as vulnerable to ESC8
+5. Certipy relay plus PetitPotam coercion captures the domain controller's own NTLM authentication
+6. A certificate is obtained for the DC's machine account, used to recover its NTLM hash
+7. DCSync with the DC hash dumps every credential in the domain
 
 ## TL;DR
 

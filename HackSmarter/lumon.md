@@ -1,8 +1,17 @@
 # Lumon
 
 **Category:** Active Directory  
-**Techniques:** RPC/Kerberos enumeration, Group Policy file parsing, NTLM coercion via CVE-2025-24054, NTLM relay attempt  
 **Status:** Not completed, this lab is left as an open investigation rather than a full compromise
+
+## Attack Chain
+
+1. Initial SMB/AD enumeration with `hellyr`'s credentials: a large user list, no direct leaks
+2. A guessed password spray and ASREPRoasting both fail
+3. A writable SMB share on the intranet app is found; three NTLM poisoning attempts fail
+4. CVE-2025-24054 (`.library-ms` NTLM leak) coerces and captures `harmonyc`'s NTLMv2 hash
+5. `harmonyc` (Administration group) gains Admin Panel access on the intranet site
+6. `ADMIN$`/`C$` browsing looks promising, but an `ntlmrelayx` relay attempt produces no output
+7. Investigation left open, mid-attempt
 
 ## TL;DR
 

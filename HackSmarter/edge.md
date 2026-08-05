@@ -1,7 +1,17 @@
 # Edge
 
-**Category:** Active Directory, Kiosk Breakout  
-**Techniques:** SMB write-share abuse attempts, ASREPRoasting, NTLM theft, EdgeSnapper credential extraction, kiosk breakout, credential loot from config files
+**Category:** Active Directory, Kiosk Breakout
+
+## Attack Chain
+
+1. A writable SMB share is found; a trojanized script, ASREPRoasting, and NTLM theft are all tried against it and fail
+2. The original starting credentials turn out to work directly over RDP and WinRM
+3. Standard credential-hunting tools are blocked by AV
+4. EdgeSnapper extracts a cleartext credential (`svc_vdi`) from Microsoft Edge's process memory
+5. RDP as `svc_vdi` lands in a locked-down Kiosk-mode session
+6. Downloading and opening `cmd.exe` through Edge itself breaks out of the Kiosk restriction
+7. A PowerShell reverse shell is spawned; a `putty.conf` file leaks `svc_vdi_mgmt` credentials
+8. `svc_vdi_mgmt` has full administrative access, confirmed over WinRM
 
 ## TL;DR
 

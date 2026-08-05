@@ -1,7 +1,16 @@
 # Welcome
 
-**Category:** Active Directory Certificate Services (AD CS)  
-**Techniques:** PDF password cracking, RPC user enumeration, password spraying, BloodHound ACL abuse (GenericAll), ESC1 certificate template abuse
+**Category:** Active Directory Certificate Services (AD CS)
+
+## Attack Chain
+
+1. A password-protected PDF on an SMB share is cracked with `pdf2john`, revealing a default password pattern
+2. RPC enumeration plus a password spray against that pattern lands `a.harris`
+3. BloodHound: `a.harris` (HR group) has `GenericAll` on `i.park`, password reset
+4. `i.park` (Helpdesk group) has `GenericAll` on `svc_ca` and `svc_web`, both reset
+5. `svc_ca`'s name points to AD CS; Certipy finds an ESC1-vulnerable template
+6. ESC1 is abused to request a certificate impersonating Administrator
+7. The certificate authenticates as Administrator, confirmed over WinRM
 
 ## TL;DR
 

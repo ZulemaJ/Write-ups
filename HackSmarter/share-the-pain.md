@@ -1,7 +1,16 @@
 # Share The Pain
 
-**Category:** Active Directory  
-**Techniques:** NTLM theft (file-based coercion), BloodHound GenericAll abuse, port pivoting (Ligolo-ng, chisel), MSSQL access, xp_cmdshell, service impersonation (PrintSpoofer)
+**Category:** Active Directory
+
+## Attack Chain
+
+1. No credentials and no HTTP surface; NTLM theft via a writable share captures `bob.ross`'s NTLMv2 hash
+2. BloodHound: `bob.ross` has `GenericAll` on `alice.wonderland`, password force-changed
+3. A base64 string on Alice's desktop turns out to be just the lab flag, not credentials
+4. `netstat` reveals a local MSSQL port; a Ligolo-ng tunnel gets through but authentication keeps failing
+5. Switching to `chisel` and adding the missing `-windows-auth` flag fixes the MSSQL login
+6. `xp_cmdshell` is enabled from the MSSQL service context, a reverse shell spawned
+7. The service account holds impersonation privileges; PrintSpoofer escalates to SYSTEM
 
 ## TL;DR
 

@@ -1,7 +1,17 @@
 # Sysco
 
-**Category:** Active Directory, No Credentials  
-**Techniques:** Username crafting (username-anarchy), ASREPRoasting, webmail credential leak, GPO abuse (pyGPOAbuse)
+**Category:** Active Directory, No Credentials
+
+## Attack Chain
+
+1. TimeRoasting and common webmail credentials fail; ASREPRoasting with guessed usernames hits an LDAP bind error
+2. `username-anarchy` generates realistic usernames from names found on the site
+3. ASREPRoasting with the generated list cracks `jack.dowland`'s hash
+4. `jack.dowland` has no useful BloodHound edges but does have Roundcube webmail access
+5. A config file in the mailbox leaks an MD5 secret, cracked and sprayed to land `lainey.moore`
+6. RDP as Lainey finds a saved PuTTY session with router credentials, reused by `greg.shields`
+7. `greg.shields` belongs to Group Policy Creator Owners, full control of the Default Domain Policy
+8. `pyGPOAbuse` pushes a scheduled task that creates a new local administrator
 
 ## TL;DR
 

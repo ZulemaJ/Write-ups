@@ -1,7 +1,13 @@
 # Slayer
 
-**Category:** Active Directory  
-**Techniques:** RDP access, host enumeration, credential dumping attempts
+**Category:** Active Directory
+
+## Attack Chain
+
+1. Known credentials (`tyler.ramsey`) grant RDP access to the target
+2. Filesystem and process enumeration looks for loot and credential-dumping opportunities
+3. `edgesnapper.exe`, RPC enumeration, and `enum4linux-ng` are all tried, none conclusive
+4. Investigation left open, no privilege escalation path found in this pass
 
 ## TL;DR
 

@@ -1,7 +1,16 @@
 # Past
 
-**Category:** Active Directory, No Credentials  
-**Techniques:** TimeRoasting, Kerberos-only authentication, BloodHound enumeration, Resource-Based Constrained Delegation (RBCD)
+**Category:** Active Directory, No Credentials
+
+## Attack Chain
+
+1. Guest SMB access leaks a list of AD hosts, no direct compromise yet
+2. TimeRoasting cracks the `APPDEV01$` machine account hash
+3. `APPDEV01$` SMB access exposes a logon script containing Tyler's cleartext password
+4. NTLM logon is restricted for Tyler; a Kerberos TGT is used to authenticate instead
+5. BloodHound shows Tyler has `GenericAll` on the domain controller object
+6. A Resource-Based Constrained Delegation (RBCD) attack forges a ticket impersonating Administrator
+7. `secretsdump` and `evil-winrm` complete the compromise
 
 ## TL;DR
 
